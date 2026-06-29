@@ -1,0 +1,10 @@
+*.png
+*.jpg
+*.jpeg
+*.webp
+# YOLO Datensätze ignorieren
+datasets/
+data/images/
+data/labels/
+*.pt
+*.onnx
