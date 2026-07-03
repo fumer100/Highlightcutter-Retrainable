@@ -5,7 +5,7 @@ from app.core.pipeline import Pipeline
 def main():
 
     pipeline = Pipeline(
-        game_name="The Finals",
+        game_name="THE FINALS",
         model_path="models/THE FINALS/current.pt"
     )
 

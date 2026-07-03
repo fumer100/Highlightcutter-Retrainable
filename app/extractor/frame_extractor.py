@@ -41,7 +41,7 @@ class FrameExtractor:
 
         frame_count = 0
 
-        extracted = 0
+        extracted_samples = []
 
         for event_time in event_timestamps:
 
@@ -95,10 +95,10 @@ class FrameExtractor:
                     meta_path = self.dm.review_metadata / f"{sample_id}.json"
                     meta.save(meta_path)
 
-                    extracted += 1
+                    extracted_samples.append(sample_id)
 
                 current_frame += 1
 
         cap.release()
 
-        return extracted
+        return extracted_samples

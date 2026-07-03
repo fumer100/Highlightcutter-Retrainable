@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "highlight_cutter"
+version = "0.1.0"
+
+[tool.setuptools]
+# Hier listen wir explizit auf, welche Ordner Python-Code enthalten,
+# der importiert werden soll (z.B. 'app' und falls nötig andere).
+packages = ["app","config"]

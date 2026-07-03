@@ -563,6 +563,36 @@ def get_video_duration(video_path: str) -> float:
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return float(result.stdout.strip())
 
+import subprocess
+import json
+
+def get_stream_maps(video_path: str) -> list[str]:
+    """
+    Ermittelt alle tatsächlich vorhandenen Streams (Video + Audio)
+    und gibt die passenden -map Argumente zurück.
+    """
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=index,codec_type",
+            "-of", "json",
+            str(video_path),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+
+    video_indices = [s["index"] for s in streams if s["codec_type"] == "video"]
+    audio_indices = [s["index"] for s in streams if s["codec_type"] == "audio"]
+
+    maps = []
+    for idx in video_indices:
+        maps += ["-map", f"0:{idx}"]
+    for idx in audio_indices:
+        maps += ["-map", f"0:{idx}"]
+
+    return maps
 
 def cut_and_concat(
     video_path: str,
@@ -582,18 +612,14 @@ def cut_and_concat(
             clip_path = os.path.join(tmpdir, f"clip_{i:03d}.mp4")
             duration = end - start
 
+            stream_maps = get_stream_maps(video_path)
+
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{start:.3f}",
                 "-i", video_path,
                 "-t", f"{duration:.3f}",
-                "-map", "0:v",
-                "-map", "0:1",
-                "-map", "0:2",
-                "-map", "0:3",
-                "-map", "0:4",
-                "-map", "0:5",
-                "-map", "0:6",
+                *stream_maps,
                 "-avoid_negative_ts", "make_zero",
             ]
 
@@ -624,18 +650,14 @@ def cut_and_concat(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
         print("[Concat] Fuege Segmente zusammen ...")
+        first_clip_maps = get_stream_maps(clip_paths[0])  # erster Zwischen-Clip als Referenz
+
         subprocess.run([
             "ffmpeg", "-y",
             "-fflags", "+genpts",
             "-f", "concat", "-safe", "0",
             "-i", concat_file,
-            "-map", "0:v",
-            "-map", "0:1",
-            "-map", "0:2",
-            "-map", "0:3",
-            "-map", "0:4",
-            "-map", "0:5",
-            "-map", "0:6", 
+            *first_clip_maps,
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
             output_path,
@@ -650,7 +672,7 @@ def cut_and_concat(
 # Hauptablauf
 # ----------------------------------------------------------------------
 
-def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None) -> None:
+def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None) -> dict:
     """
     progress_callback(phase: str, percent: float) wird optional bei
     den wichtigsten Phasen aufgerufen:
@@ -681,14 +703,18 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
     timeline_rows = []
     final_timeline_rows = []
-
+    result = {
+    "yolo_event_times": [],
+    "intro_metadata": [],
+    "output_path": output_path,
+    }
     try:
         duration = get_video_duration(video_path)
         print(f"Video: {video_path}")
         print(f"Video-Laenge: {fmt_time(duration)}")
 
         yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback)
-
+        result["yolo_event_times"] = yolo_event_times
         if progress_callback is not None:
             progress_callback("Audio-Analyse", 0.0)
         rms, times = compute_rms(video_path)
@@ -701,7 +727,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         if not points:
             print("Keine Trigger-Punkte gefunden.")
             sys.stdout = original_stdout
-            return
+            return result
 
         # --- Phase B: Clustering ---
         clusters = cluster_points(points, cfg)
@@ -712,7 +738,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         if not windows:
             print("Keine Fenster nach Filterung uebrig.")
             sys.stdout = original_stdout
-            return
+            return result
 
         # --- Phase D: Merge ---
         merged_windows = merge_windows(windows, cfg.merge_gap_sec)
@@ -853,7 +879,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
             )
 
             cumulative = final_end
-
+            result["intro_metadata"] = intro_metadata
     finally:
         if not gui_already_capturing:
             sys.stdout = original_stdout
@@ -900,7 +926,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         )
 
     print(f"[Log] Intro-Metadaten gespeichert: {json_path}")
-
+    return result
 # ----------------------------------------------------------------------
 # Aufruf
 # ----------------------------------------------------------------------
