@@ -1,0 +1,13 @@
+{
+  "games": {
+    "The Finals": {
+      "model": "models/finals/current.pt",
+      "dataset": "datasets/finals",
+      "review_queue": "review_queue/finals",
+      "classes": [
+        "event",
+        "hitmarker"
+      ]
+    }
+  }
+}
