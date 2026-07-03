@@ -6,8 +6,15 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from highlight_cutter_pointbased import Config, process_video
-
+root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if root_path not in sys.path:
+    sys.path.insert(0, root_path)
+    
+from app.review.review_window import ReviewWindow 
+from app.dataset.dataset_manager import DatasetManager
+from app.training.trainer import Trainer 
+from app.cutter.highlight_cutter_pointbased import Config, process_video
+from app.core.pipeline_controller import PipelineController
 
 class QueueWriter(io.TextIOBase):
     def __init__(self, log_queue: queue.Queue, real_stdout):
@@ -142,6 +149,7 @@ class SettingsWindow(tk.Toplevel):
         tk.Button(btn_frame, text="Uebernehmen", command=self._apply, width=15).pack(side="left", padx=5)
         tk.Button(btn_frame, text="Abbrechen",   command=self.destroy, width=15).pack(side="left", padx=5)
         tk.Button(btn_frame, text="Zuruecksetzen", command=self._reset, width=15).pack(side="left", padx=5)
+        
 
     def _apply(self):
         errors = []
@@ -222,10 +230,24 @@ class HighlightCutterGUI:
             command=self.start_processing
         )
         self.start_btn.pack(side="left", padx=5)
+        tk.Button(
+        btn_frame, text="🚀 Process + ML Pipeline",
+        command=self.run_ml_pipeline, bg="green", fg="white"
+        ).pack(side="left", padx=5)
 
+        tk.Button(
+        btn_frame, text="🧠 Train Model",
+        command=self.run_training, bg="blue", fg="white"
+        ).pack(side="left", padx=5)
+
+        self.review_btn = tk.Button(
+        btn_frame, text="🧾 Open Review Queue",
+        command=self.open_review, bg="orange", fg="black"
+        )
+        self.review_btn.pack(side="left", padx=5)
         # --- YOLO-Modell Auswahl ---
         self.AVAILABLE_MODELS = {
-            "The Finals": r"D:\YOLO_Training\runs\hitmarkerEvents\weights\best.pt",
+            "THE FINALS": r"D:\TurkishCowboy Video Editor\HighlichtCutter - Retrainable\models\THE FINALS\current.pt",
             "BF6(not available)":""
         }
 
@@ -272,7 +294,11 @@ class HighlightCutterGUI:
         self.log_text.config(yscrollcommand=scrollbar.set)
 
         self.root.after(100, self._drain_log_queue)
-
+        self.dataset_manager = DatasetManager("The Finals")
+        self.pipeline_controller = PipelineController(
+            game_name="The Finals",
+            model_path="models/THE FINALS/current.pt"
+        )
     # ------------------------------------------------------------
     # UI-Aktionen
     # ------------------------------------------------------------
@@ -349,8 +375,7 @@ class HighlightCutterGUI:
             os.makedirs(output_dir, exist_ok=True)
 
             # YOLO-Modell aus Dropdown in Config uebernehmen
-            selected_model_path = self.AVAILABLE_MODELS.get(self.model_var.get()) or None
-            self.cfg.yolo_model_path = selected_model_path
+            self._sync_model_path()
 
             total = len(self.video_files)
             progress_callback = self._make_progress_callback()
@@ -383,7 +408,95 @@ class HighlightCutterGUI:
             self.start_btn.config(state="normal")
             self.model_dropdown.config(state="readonly")
 
+    def open_review(self):
+        ReviewWindow(
+            self.root,
+            str(self.dataset_manager.review),
+            dataset_manager=self.dataset_manager,
+        )
 
+    def run_training(self):
+        self.start_btn.config(state="disabled")
+        threading.Thread(target=self._train_worker, daemon=True).start()
+
+    def _train_worker(self):
+        real_stdout = sys.stdout
+        sys.stdout = QueueWriter(self.log_queue, real_stdout)
+        try:
+            trainer = Trainer(self.dataset_manager, model_path=str(self.dataset_manager.game.model_path))
+            self.status.set("Training laeuft...")
+            trainer.train(epochs=30, img_size=640)
+            self.status.set("Training fertig")
+            messagebox.showinfo("Training", "Retraining abgeschlossen.")
+        except Exception as e:
+            messagebox.showerror("Fehler", str(e))
+        finally:
+            sys.stdout = real_stdout
+            self.start_btn.config(state="normal")
+
+    def run_ml_pipeline(self):
+        if not self.video_files:
+            messagebox.showwarning("Hinweis", "Keine Videos ausgewaehlt.")
+            return
+        self.start_btn.config(state="disabled")
+        threading.Thread(target=self._ml_pipeline_worker, daemon=True).start()
+        
+    def _sync_model_path(self):
+        self.cfg.yolo_model_path = self.AVAILABLE_MODELS.get(self.model_var.get()) or None
+        
+    def _ml_pipeline_worker(self):
+        real_stdout = sys.stdout
+        sys.stdout = QueueWriter(self.log_queue, real_stdout)
+        try:
+            self._sync_model_path()
+            output_dir = r"D:\EDITED CLIPS\Skript Cutted\Fertig zur Finalisierung"
+            os.makedirs(output_dir, exist_ok=True)
+
+            total_extracted = total_annotated = total_needs_review = 0
+
+            for video in self.video_files:
+                self.status.set(f"ML-Pipeline: {os.path.basename(video)}")
+
+                base = os.path.splitext(os.path.basename(video))[0]
+                output_path = os.path.join(output_dir, f"{base}_highlight.mp4")
+
+                result = process_video(
+                    video_path=video,
+                    output_path=output_path,
+                    cfg=self.cfg,
+                    progress_callback=self._make_progress_callback(),
+                )
+
+                stats = self.pipeline_controller.run_full_cycle(
+                    video_path=video,
+                    events=result["yolo_event_times"],
+                )
+
+                total_extracted += stats["extracted"]
+                total_annotated += stats["annotated"]
+                total_needs_review += stats["needs_review"]
+
+            self.status.set("ML-Pipeline fertig")
+            self._update_review_badge(total_needs_review)
+
+            messagebox.showinfo(
+                "ML-Pipeline abgeschlossen",
+                f"{total_extracted} Frames extrahiert\n"
+                f"{total_annotated} automatisch annotiert\n"
+                f"{total_needs_review} Frames benoetigen manuelle Korrektur",
+            )
+
+        except Exception as e:
+            messagebox.showerror("Fehler", str(e))
+        finally:
+            sys.stdout = real_stdout
+            self.start_btn.config(state="normal")
+
+    def _update_review_badge(self, count: int):
+        label = "🧾 Open Review Queue" if count == 0 else f"🧾 Review Queue ({count})"
+        self.review_btn.config(text=label)
+        
+   
 if __name__ == "__main__":
     root = tk.Tk()
     HighlightCutterGUI(root)

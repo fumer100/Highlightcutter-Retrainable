@@ -25,11 +25,11 @@ GAMES = {
 
         name="The Finals",
 
-        model_path=PROJECT_ROOT / "models" / "finals" / "current.pt",
+        model_path=PROJECT_ROOT / "models" / "THE FINALS" / "current.pt",
 
-        dataset_path=PROJECT_ROOT / "datasets" / "finals",
+        dataset_path=PROJECT_ROOT / "datasets" / "THE FINALS",
 
-        review_queue_path=PROJECT_ROOT / "review_queue" / "finals",
+        review_queue_path=PROJECT_ROOT / "review_queue" / "THE FINALS",
 
         classes=[
             "event",
