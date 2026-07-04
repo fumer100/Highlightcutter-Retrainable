@@ -1,12 +1,20 @@
 {
   "games": {
     "The Finals": {
-      "model": "models/finals/current.pt",
-      "dataset": "datasets/finals",
-      "review_queue": "review_queue/finals",
+      "model_path": "models/THE FINALS/current.pt",
+      "dataset_path": "datasets/THE FINALS",
+      "review_queue_path": "review_queue/THE FINALS",
       "classes": [
         "event",
         "hitmarker"
+      ]
+    },
+    "Battlefield 6": {
+      "model_path": "models/BF6/current.pt",
+      "dataset_path": "datasets/BF6",
+      "review_queue_path": "review_queue/BF6",
+      "classes": [
+        "Kill/Assist"
       ]
     }
   }

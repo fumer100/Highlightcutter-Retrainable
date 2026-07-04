@@ -9,13 +9,15 @@ import math
 class ReviewWindow(tk.Toplevel):
     
     HANDLE_SIZE = 6
-    
-    def __init__(self, parent, review_queue_path: str, dataset_manager=None, on_close=None):
+    PALETTE = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#1abc9c", "#e67e22", "#34495e"]
+    def __init__(self, parent, review_queue_path: str, dataset_manager=None, classes=None, on_close=None):
         super().__init__(parent)
         self.title("Active Learning Review Tool - v3")
         self.on_close = on_close
         self.dm = dataset_manager
-
+        self.classes = classes or (dataset_manager.game.classes if dataset_manager else [])
+        self.selected_class = 0
+        self.class_buttons = {}
         self.review_path = Path(review_queue_path)
         self.image_paths = list((self.review_path / "images").glob("*.jpg"))
         self.label_dir = self.review_path / "labels"
@@ -37,8 +39,15 @@ class ReviewWindow(tk.Toplevel):
         self.canvas = tk.Canvas(self, width=self.canvas_w, height=self.canvas_h, bg="black")
         self.canvas.pack()
 
-        btn = tk.Frame(self)
-        btn.pack()
+        controls = tk.Frame(self)
+        controls.pack()
+
+        self.class_frame = tk.Frame(controls)
+        self.class_frame.pack(side=tk.LEFT, padx=(0, 15))
+        self._build_class_buttons()
+
+        btn = tk.Frame(controls)
+        btn.pack(side=tk.LEFT)
 
         tk.Button(btn, text="Accept (A)", command=self.accept).pack(side=tk.LEFT)
         tk.Button(btn, text="Reject (D)", command=self.reject).pack(side=tk.LEFT)
@@ -123,7 +132,41 @@ class ReviewWindow(tk.Toplevel):
                     "w": float(w),
                     "h": float(h)
                 })
+                
+    def _build_class_buttons(self):
+        for i, cls_name in enumerate(self.classes):
+            color = self._class_color(i)
+            key = str(i + 1)
 
+            btn = tk.Button(
+                self.class_frame,
+                text=f"{key}: {cls_name}",
+                bg=color, fg="white", width=12,
+                relief=tk.SUNKEN if i == self.selected_class else tk.RAISED,
+                command=lambda idx=i: self._select_class(idx),
+            )
+            btn.pack(side=tk.LEFT, padx=2)
+            self.class_buttons[i] = btn
+            self.bind(key, lambda e, idx=i: self._select_class(idx))
+
+    def _select_class(self, idx):
+        self.selected_class = idx
+        for i, b in self.class_buttons.items():
+            b.config(relief=tk.SUNKEN if i == idx else tk.RAISED)
+
+        # Falls gerade eine bestehende Box ausgewaehlt ist: Klasse direkt umlabeln
+        if self.selected_box is not None and self.selected_box < len(self.boxes):
+            self.boxes[self.selected_box]["cls"] = idx
+            self.save_labels()
+            self._redraw_boxes_only()
+
+    def _class_color(self, cls_id):
+        return self.PALETTE[cls_id % len(self.PALETTE)]
+
+    def _class_name(self, cls_id):
+        if 0 <= cls_id < len(self.classes):
+            return self.classes[cls_id]
+        return f"cls{cls_id}"
     # -------------------------
     # DRAW
     # -------------------------
@@ -135,12 +178,20 @@ class ReviewWindow(tk.Toplevel):
             w = b["w"] * self.canvas_w
             h = b["h"] * self.canvas_h
 
-            color = "yellow" if self.selected_box == i else "red"
+            color = self._class_color(b["cls"])
+            width = 3 if self.selected_box == i else 2
 
             self.canvas.create_rectangle(
                 x - w / 2, y - h / 2, x + w / 2, y + h / 2,
-                outline=color, width=2,
+                outline=color, width=width,
                 tags=("box", f"box_{i}")
+            )
+
+            self.canvas.create_text(
+                x - w / 2 + 4, y - h / 2 - 10,
+                text=self._class_name(b["cls"]), fill=color, anchor="w",
+                font=("", 10, "bold"),
+                tags=("box", f"boxlabel_{i}")
             )
 
             if self.selected_box == i:
@@ -253,7 +304,7 @@ class ReviewWindow(tk.Toplevel):
                 top, bottom = sorted((sy, ey))
 
                 self.boxes.append({
-                    "cls": 0,
+                    "cls": self.selected_class,
                     "x": (left + right) / 2 / self.canvas_w,
                     "y": (top + bottom) / 2 / self.canvas_h,
                     "w": (right - left) / self.canvas_w,
@@ -423,15 +474,9 @@ class ReviewWindow(tk.Toplevel):
         stem = self.current_image_path.stem
         label_src = self.label_dir / f"{stem}.txt"
 
-        img_dst = self.dm.train_images / self.current_image_path.name
-        label_dst = self.dm.train_labels / f"{stem}.txt"
-
-        self.current_image_path.rename(img_dst)
-        if label_src.exists():
-            label_src.rename(label_dst)
+        img_dst, lbl_dst = self.dm.route_promoted_sample(self.current_image_path, label_src)
 
         del self.image_paths[self.index]
-
         if self.index >= len(self.image_paths):
             self.index = max(0, len(self.image_paths) - 1)
 

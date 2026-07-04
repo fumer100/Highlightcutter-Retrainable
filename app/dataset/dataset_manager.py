@@ -12,7 +12,7 @@ class DatasetManager:
     Diese Klasse ist die EINZIGE Stelle,
     die Dateien verschiebt oder kopiert.
     """
-
+    VAL_SPLIT_RATIO = 0.1  # Ziel: ~10% der Daten landen in val/
     def __init__(self, game_name: str):
 
         if game_name not in GAMES:
@@ -133,3 +133,29 @@ class DatasetManager:
         }
 
         return stats
+    
+    
+
+    def route_promoted_sample(self, image_path: Path, label_path: Path):
+        """
+        Verschiebt ein akzeptiertes Review-Sample nach train/ oder val/,
+        je nachdem was das aktuelle Verhaeltnis noch braucht.
+        """
+        train_count = len(list(self.train_images.glob("*.jpg")))
+        val_count = len(list(self.val_images.glob("*.jpg")))
+        total = train_count + val_count
+
+        target_val_count = round((total + 1) * self.VAL_SPLIT_RATIO)
+
+        if val_count < target_val_count:
+            img_dst = self.val_images / image_path.name
+            lbl_dst = self.val_labels / label_path.name
+        else:
+            img_dst = self.train_images / image_path.name
+            lbl_dst = self.train_labels / label_path.name
+
+        image_path.rename(img_dst)
+        if label_path.exists():
+            label_path.rename(lbl_dst)
+
+        return img_dst, lbl_dst

@@ -15,7 +15,7 @@ from app.dataset.dataset_manager import DatasetManager
 from app.training.trainer import Trainer 
 from app.cutter.highlight_cutter_pointbased import Config, process_video
 from app.core.pipeline_controller import PipelineController
-
+from config.games import GAMES, reload_games, GamesConfigError
 class QueueWriter(io.TextIOBase):
     def __init__(self, log_queue: queue.Queue, real_stdout):
         self.log_queue = log_queue
@@ -195,8 +195,35 @@ class HighlightCutterGUI:
 
         # Config-Objekt (wird vom Einstellungs-Fenster veraendert)
         self.cfg = Config(
-            yolo_model_path=None  # wird ueber Dropdown gesetzt
+            yolo_model_path=None
         )
+
+        # Cache: haelt pro Spiel genau einen DatasetManager/PipelineController vor,
+        # damit nicht bei jedem Klick neu instanziiert wird
+        self._dataset_managers = {}
+        self._pipeline_controllers = {}
+
+        model_frame = tk.Frame(root)
+        model_frame.pack(pady=(0, 5), fill="x", padx=10)
+
+        tk.Label(model_frame, text="Spiel / YOLO-Modell:").pack(side="left")
+
+        self.model_var = tk.StringVar()
+        self.model_dropdown = ttk.Combobox(
+            model_frame,
+            textvariable=self.model_var,
+            state="readonly",
+            width=40,
+        )
+        self.model_dropdown.pack(side="left", padx=5)
+
+        tk.Button(
+            model_frame, text="🔄", width=3,
+            command=self.refresh_games
+        ).pack(side="left", padx=2)
+
+        self._refresh_game_dropdown()
+        self._refresh_game_dropdown()
 
         tk.Label(root, text="Videos").pack(pady=5)
 
@@ -207,64 +234,37 @@ class HighlightCutterGUI:
         btn_frame.pack(pady=10)
 
         tk.Button(
-            btn_frame,
-            text="Videos auswaehlen",
-            command=self.select_videos
+            btn_frame, text="Videos auswaehlen", command=self.select_videos
         ).pack(side="left", padx=5)
 
         tk.Button(
-            btn_frame,
-            text="Liste leeren",
-            command=self.clear_list
+            btn_frame, text="Liste leeren", command=self.clear_list
         ).pack(side="left", padx=5)
 
         tk.Button(
-            btn_frame,
-            text="Einstellungen",
-            command=self.open_settings
+            btn_frame, text="Einstellungen", command=self.open_settings
         ).pack(side="left", padx=5)
 
         self.start_btn = tk.Button(
-            btn_frame,
-            text="Start",
-            command=self.start_processing
+            btn_frame, text="Start", command=self.start_processing
         )
         self.start_btn.pack(side="left", padx=5)
+
         tk.Button(
-        btn_frame, text="🚀 Process + ML Pipeline",
-        command=self.run_ml_pipeline, bg="green", fg="white"
+            btn_frame, text="🚀 Process + ML Pipeline",
+            command=self.run_ml_pipeline, bg="green", fg="white"
         ).pack(side="left", padx=5)
 
         tk.Button(
-        btn_frame, text="🧠 Train Model",
-        command=self.run_training, bg="blue", fg="white"
+            btn_frame, text="🧠 Train Model",
+            command=self.run_training, bg="blue", fg="white"
         ).pack(side="left", padx=5)
 
         self.review_btn = tk.Button(
-        btn_frame, text="🧾 Open Review Queue",
-        command=self.open_review, bg="orange", fg="black"
+            btn_frame, text="🧾 Open Review Queue",
+            command=self.open_review, bg="orange", fg="black"
         )
         self.review_btn.pack(side="left", padx=5)
-        # --- YOLO-Modell Auswahl ---
-        self.AVAILABLE_MODELS = {
-            "THE FINALS": r"D:\TurkishCowboy Video Editor\HighlichtCutter - Retrainable\models\THE FINALS\current.pt",
-            "BF6(not available)":""
-        }
-
-        model_frame = tk.Frame(root)
-        model_frame.pack(pady=(0, 5), fill="x", padx=10)
-
-        tk.Label(model_frame, text="YOLO-Modell:").pack(side="left")
-
-        self.model_var = tk.StringVar(value=list(self.AVAILABLE_MODELS.keys())[0])
-        self.model_dropdown = ttk.Combobox(
-            model_frame,
-            textvariable=self.model_var,
-            values=list(self.AVAILABLE_MODELS.keys()),
-            state="readonly",
-            width=40,
-        )
-        self.model_dropdown.pack(side="left", padx=5)
 
         # --- Gesamt-Fortschritt (Video X/Y) ---
         tk.Label(root, text="Gesamt-Fortschritt (Video X von Y)").pack(anchor="w", padx=10)
@@ -294,11 +294,7 @@ class HighlightCutterGUI:
         self.log_text.config(yscrollcommand=scrollbar.set)
 
         self.root.after(100, self._drain_log_queue)
-        self.dataset_manager = DatasetManager("The Finals")
-        self.pipeline_controller = PipelineController(
-            game_name="The Finals",
-            model_path="models/THE FINALS/current.pt"
-        )
+        
     # ------------------------------------------------------------
     # UI-Aktionen
     # ------------------------------------------------------------
@@ -319,6 +315,55 @@ class HighlightCutterGUI:
     def open_settings(self):
         SettingsWindow(self.root, self.cfg, on_apply=self._on_settings_apply)
 
+    def _refresh_game_dropdown(self):
+        game_names = list(GAMES.keys())
+        if not game_names:
+            messagebox.showerror(
+                "Keine Spiele konfiguriert",
+                "config/games.json enthaelt keine Eintraege unter 'games'."
+            )
+            return
+
+        self.model_dropdown["values"] = game_names
+        if self.model_var.get() not in game_names:
+            self.model_var.set(game_names[0])
+
+    def refresh_games(self):
+        """Laedt config/games.json neu ein, ohne die GUI neu zu starten."""
+        try:
+            reload_games()
+        except (GamesConfigError, FileNotFoundError) as e:
+            messagebox.showerror("Fehler in games.json", str(e))
+            return
+
+        self._dataset_managers.clear()
+        self._pipeline_controllers.clear()
+        self._refresh_game_dropdown()
+        messagebox.showinfo("Aktualisiert", f"{len(GAMES)} Spiele geladen.")
+
+    def _current_game_name(self):
+        return self.model_var.get()
+
+    def _get_dataset_manager(self):
+        game_name = self._current_game_name()
+        if game_name not in self._dataset_managers:
+            self._dataset_managers[game_name] = DatasetManager(game_name)
+        return self._dataset_managers[game_name]
+
+    def _get_pipeline_controller(self):
+        game_name = self._current_game_name()
+        if game_name not in self._pipeline_controllers:
+            dm = self._get_dataset_manager()
+            self._pipeline_controllers[game_name] = PipelineController(
+                game_name=game_name,
+                model_path=str(dm.game.model_path),
+            )
+        return self._pipeline_controllers[game_name]
+
+    def _sync_model_path(self):
+        dm = self._get_dataset_manager()
+        self.cfg.yolo_model_path = str(dm.game.model_path)
+    
     def _on_settings_apply(self, updated_cfg: Config):
         self.cfg = updated_cfg
 
@@ -409,10 +454,12 @@ class HighlightCutterGUI:
             self.model_dropdown.config(state="readonly")
 
     def open_review(self):
+        dm = self._get_dataset_manager()
         ReviewWindow(
             self.root,
-            str(self.dataset_manager.review),
-            dataset_manager=self.dataset_manager,
+            str(dm.review),
+            dataset_manager=dm,
+            classes=dm.game.classes,
         )
 
     def run_training(self):
@@ -423,7 +470,8 @@ class HighlightCutterGUI:
         real_stdout = sys.stdout
         sys.stdout = QueueWriter(self.log_queue, real_stdout)
         try:
-            trainer = Trainer(self.dataset_manager, model_path=str(self.dataset_manager.game.model_path))
+            dm = self._get_dataset_manager()
+            trainer = Trainer(dm, model_path=str(dm.game.model_path))
             self.status.set("Training laeuft...")
             trainer.train(epochs=30, img_size=640)
             self.status.set("Training fertig")
@@ -440,9 +488,6 @@ class HighlightCutterGUI:
             return
         self.start_btn.config(state="disabled")
         threading.Thread(target=self._ml_pipeline_worker, daemon=True).start()
-        
-    def _sync_model_path(self):
-        self.cfg.yolo_model_path = self.AVAILABLE_MODELS.get(self.model_var.get()) or None
         
     def _ml_pipeline_worker(self):
         real_stdout = sys.stdout
@@ -467,7 +512,7 @@ class HighlightCutterGUI:
                     progress_callback=self._make_progress_callback(),
                 )
 
-                stats = self.pipeline_controller.run_full_cycle(
+                stats = self._get_pipeline_controller().run_full_cycle(
                     video_path=video,
                     events=result["yolo_event_times"],
                 )
@@ -498,6 +543,16 @@ class HighlightCutterGUI:
         
    
 if __name__ == "__main__":
+    try:
+        from config.games import GAMES  # loest Validierung aus, falls noch nicht geschehen
+    except Exception as e:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Konfigurationsfehler", str(e))
+        raise SystemExit(1)
+
     root = tk.Tk()
     HighlightCutterGUI(root)
     root.mainloop()
