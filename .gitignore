@@ -8,3 +8,4 @@ data/images/
 data/labels/
 *.pt
 *.onnx
+*.pyc
