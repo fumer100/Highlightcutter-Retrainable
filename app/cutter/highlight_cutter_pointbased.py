@@ -77,7 +77,7 @@ except ImportError:
 @dataclass
 class Config:
     # --- Phase A: Trigger-Erkennung ---
-    audio_threshold_percentile: float = 90   # Schwelle fuer Audio-Peak-Punkte
+    audio_threshold_percentile: float = 92   # Schwelle fuer Audio-Peak-Punkte
     yolo_model_path: str | None = None
     yolo_sample_every_n_frames: int = 5
     yolo_confidence: float = 0.4
@@ -87,7 +87,7 @@ class Config:
     cluster_max_gap_sec: float = 1.75         # max. Abstand zwischen Punkten im selben Cluster
 
     # --- Phase C: Fenster pro Cluster ---
-    audio_pre_buffer_sec: float = 1.25       # Pre-Buffer wenn Cluster mit Audio-Peak beginnt
+    audio_pre_buffer_sec: float = 1.5       # Pre-Buffer wenn Cluster mit Audio-Peak beginnt
     yolo_pre_buffer_sec: float = 1.5        # Pre-Buffer wenn Cluster mit YOLO-Event beginnt
 
     base_post_buffer_sec: float = 0.825      # Basis-Nachlaufzeit nach letztem Punkt im Cluster
