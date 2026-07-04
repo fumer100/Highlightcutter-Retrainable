@@ -88,9 +88,9 @@ class Config:
 
     # --- Phase C: Fenster pro Cluster ---
     audio_pre_buffer_sec: float = 1.25       # Pre-Buffer wenn Cluster mit Audio-Peak beginnt
-    yolo_pre_buffer_sec: float = 1.25        # Pre-Buffer wenn Cluster mit YOLO-Event beginnt
+    yolo_pre_buffer_sec: float = 1.5        # Pre-Buffer wenn Cluster mit YOLO-Event beginnt
 
-    base_post_buffer_sec: float = 0.725      # Basis-Nachlaufzeit nach letztem Punkt im Cluster
+    base_post_buffer_sec: float = 0.825      # Basis-Nachlaufzeit nach letztem Punkt im Cluster
 
     # Lautstaerke-abhaengiges Wachstum (bezieht sich auf das GESAMTE,
     # bereits fusionierte Cluster-Fenster, iterativ berechnet)

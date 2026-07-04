@@ -1,6 +1,17 @@
 import os
 import io
 import sys
+import subprocess
+
+if sys.platform == "win32":
+    _original_popen_init = subprocess.Popen.__init__
+
+    def _patched_popen_init(self, *args, **kwargs):
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        return _original_popen_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = _patched_popen_init
+
 import queue
 import threading
 import tkinter as tk
@@ -255,10 +266,11 @@ class HighlightCutterGUI:
             command=self.run_ml_pipeline, bg="green", fg="white"
         ).pack(side="left", padx=5)
 
-        tk.Button(
+        self.train_btn = tk.Button(
             btn_frame, text="🧠 Train Model",
             command=self.run_training, bg="blue", fg="white"
-        ).pack(side="left", padx=5)
+        )
+        self.train_btn.pack(side="left", padx=5)
 
         self.review_btn = tk.Button(
             btn_frame, text="🧾 Open Review Queue",
@@ -464,6 +476,8 @@ class HighlightCutterGUI:
 
     def run_training(self):
         self.start_btn.config(state="disabled")
+        self.model_dropdown.config(state="disabled")
+        self.train_btn.config(state="disabled")
         threading.Thread(target=self._train_worker, daemon=True).start()
 
     def _train_worker(self):
@@ -481,6 +495,8 @@ class HighlightCutterGUI:
         finally:
             sys.stdout = real_stdout
             self.start_btn.config(state="normal")
+            self.model_dropdown.config(state="readonly")
+            self.train_btn.config(state="normal")
 
     def run_ml_pipeline(self):
         if not self.video_files:
