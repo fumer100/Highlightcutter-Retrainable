@@ -51,6 +51,9 @@ ffmpeg muss installiert und im PATH verfuegbar sein.
 import os
 import subprocess
 import tempfile
+import threading
+import queue
+import concurrent.futures
 from dataclasses import dataclass, field
 import json
 import numpy as np
@@ -82,6 +85,7 @@ class Config:
     yolo_sample_every_n_frames: int = 5
     yolo_confidence: float = 0.4
     yolo_target_classes: list = field(default_factory=lambda: ["event", "hitmarker"])
+    yolo_batch_size: int = 8  # wie viele sample-Frames pro GPU-Forward-Pass gebuendelt werden
 
     # --- Phase B: Clustering ---
     cluster_max_gap_sec: float = 1.75         # max. Abstand zwischen Punkten im selben Cluster
@@ -133,6 +137,7 @@ class Config:
     use_gpu_encoding: bool = True
     crf: int = 14
     nvenc_cq: int = 15
+    max_parallel_cuts: int = 3  # wie viele Segmente gleichzeitig per ffmpeg geschnitten werden
 
 
 def fmt_time(sec: float) -> str:
@@ -155,52 +160,103 @@ def compute_rms(video_path: str):
     return rms, times
 
 
+def _run_yolo_batch(model, batch, cfg, event_times, fps):
+    """Fuehrt einen gebuendelten GPU-Forward-Pass fuer mehrere Sample-Frames aus."""
+    frame_indices = [idx for idx, _ in batch]
+    frames = [f for _, f in batch]
+    results = model.predict(frames, conf=cfg.yolo_confidence, verbose=False)
+    for frame_idx, r in zip(frame_indices, results):
+        for box in r.boxes:
+            cls_id = int(box.cls[0])
+            cls_name = model.names.get(cls_id, str(cls_id))
+            if cfg.yolo_target_classes and cls_name not in cfg.yolo_target_classes:
+                continue
+            t = round(frame_idx / fps, 2)
+            event_times.add(t)
+            break
+
+
 def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> set:
     """
     progress_callback(phase: str, percent: float) wird optional bei
-    jedem analysierten Frame mit dem aktuellen Fortschritt (0-100) aufgerufen.
+    jedem analysierten Batch mit dem aktuellen Fortschritt (0-100) aufgerufen.
+
+    Parallelisierung: Ein Hintergrund-Thread liest/dekodiert Frames per
+    OpenCV (CPU), waehrend der Hauptthread gesammelte Sample-Frames in
+    Baetches an YOLO (GPU) uebergibt. Decode und Inferenz laufen dadurch
+    ueberlappend statt strikt nacheinander, und die Batch-Inferenz nutzt
+    die GPU deutlich effizienter aus als Einzel-Frame-Aufrufe.
     """
     if cfg.yolo_model_path is None or YOLO is None:
         print("[YOLO] Kein Modell konfiguriert - YOLO uebersprungen.")
         return set()
 
     print(f"[YOLO] Lade Modell: {cfg.yolo_model_path}")
-    model = YOLO(cfg.yolo_model_path).to("cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = YOLO(cfg.yolo_model_path).to(device)
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    frame_idx = 0
     event_times = set()
+    batch_size = max(1, cfg.yolo_batch_size)
 
-    print("[YOLO] Analysiere Video ...")
+    frame_queue: queue.Queue = queue.Queue(maxsize=batch_size * 3)
+    _STOP = object()
+    reader_error = {}
+
+    def reader():
+        frame_idx = 0
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if frame_idx % cfg.yolo_sample_every_n_frames == 0:
+                    frame_queue.put((frame_idx, frame))
+                frame_idx += 1
+        except Exception as e:
+            reader_error["error"] = e
+        finally:
+            frame_queue.put(_STOP)
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    print(f"[YOLO] Analysiere Video (Batch-Groesse {batch_size}) ...")
+    batch = []
+    sampled_seen = 0
+    total_sampled = max(1, total_frames // cfg.yolo_sample_every_n_frames)
+
     while True:
-        if cancel_event is not None and cancel_event.is_set():
-            cap.release()
-            raise RuntimeError("Vorgang abgebrochen.")
+        item = frame_queue.get()
 
-        ret, frame = cap.read()
-        if not ret:
+        if item is _STOP:
+            if batch and (cancel_event is None or not cancel_event.is_set()):
+                _run_yolo_batch(model, batch, cfg, event_times, fps)
             break
 
-        if frame_idx % cfg.yolo_sample_every_n_frames == 0:
-            results = model.predict(frame, conf=cfg.yolo_confidence, verbose=False)
-            for r in results:
-                for box in r.boxes:
-                    cls_id = int(box.cls[0])
-                    cls_name = model.names.get(cls_id, str(cls_id))
-                    if cfg.yolo_target_classes and cls_name not in cfg.yolo_target_classes:
-                        continue
-                    t = round(frame_idx / fps, 2)
-                    event_times.add(t)
-                    break
+        if cancel_event is not None and cancel_event.is_set():
+            continue
 
+        batch.append(item)
+        sampled_seen += 1
+        if len(batch) >= batch_size:
+            _run_yolo_batch(model, batch, cfg, event_times, fps)
+            batch = []
             if progress_callback is not None:
-                progress_callback("YOLO-Analyse", min(100.0, frame_idx / total_frames * 100))
-
-        frame_idx += 1
+                progress_callback("YOLO-Analyse", min(100.0, sampled_seen / total_sampled * 100))
 
     cap.release()
+    reader_thread.join(timeout=5)
+
+    if reader_error:
+        raise reader_error["error"]
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Vorgang abgebrochen.")
+
     print(f"[YOLO] {len(event_times)} Event-Zeitstempel gefunden.")
     if progress_callback is not None:
         progress_callback("YOLO-Analyse", 100.0)
@@ -611,9 +667,15 @@ def cut_and_concat(
         return
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        clip_paths = []
+        clip_paths: list = [None] * len(segments)
+        completed = 0
+        completed_lock = threading.Lock()
+        running_processes: list = []
+        running_processes_lock = threading.Lock()
 
-        for i, (start, end) in enumerate(segments):
+        def cut_one(i: int, start: float, end: float):
+            nonlocal completed
+
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("Vorgang abgebrochen.")
 
@@ -622,8 +684,16 @@ def cut_and_concat(
 
             stream_maps = get_stream_maps(video_path)
 
+            # NVDEC-Decode nur, wenn auch NVENC encodiert wird - so bleiben die
+            # Frames fuer den kompletten Weg im GPU-Speicher (kein CPU-Roundtrip).
+            if cfg.use_gpu_encoding:
+                hwaccel_flags = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            else:
+                hwaccel_flags = ["-hwaccel", "cuda"]
+
             cmd = [
                 "ffmpeg", "-y",
+                *hwaccel_flags,
                 "-ss", f"{start:.3f}",
                 "-i", video_path,
                 "-t", f"{duration:.3f}",
@@ -640,6 +710,8 @@ def cut_and_concat(
 
             print(f"[Cut] Segment {i+1}/{len(segments)}: {fmt_time(start)} -> {fmt_time(end)} ({duration:.1f}s)")
             process = subprocess.Popen(cmd)
+            with running_processes_lock:
+                running_processes.append(process)
             while process.poll() is None:
                 if cancel_event is not None and cancel_event.is_set():
                     process.terminate()
@@ -649,11 +721,31 @@ def cut_and_concat(
                 raise subprocess.CalledProcessError(process.returncode, cmd)
 
             subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-select_streams", "a", clip_path], check=True)
-            clip_paths.append(clip_path)
+            clip_paths[i] = clip_path
 
-            if progress_callback is not None:
-                # Cutting zaehlt als 0-80% dieser Phase, Concat danach als 80-100%
-                progress_callback("Schneiden", (i + 1) / len(segments) * 80)
+            with completed_lock:
+                completed += 1
+                if progress_callback is not None:
+                    # Cutting zaehlt als 0-80% dieser Phase, Concat danach als 80-100%
+                    progress_callback("Schneiden", completed / len(segments) * 80)
+
+        # Mehrere Segmente parallel schneiden (CPU-Decode + GPU-Encode ueberlappen
+        # sich dadurch ueber mehrere ffmpeg-Prozesse hinweg). Begrenzt ueber
+        # cfg.max_parallel_cuts (Standard 3, u.a. wegen NVENC-Session-Limits).
+        max_workers = max(1, min(cfg.max_parallel_cuts, len(segments)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(cut_one, i, s, e) for i, (s, e) in enumerate(segments)]
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+            except BaseException:
+                for f in futures:
+                    f.cancel()
+                with running_processes_lock:
+                    for p in running_processes:
+                        if p.poll() is None:
+                            p.terminate()
+                raise
 
         if progress_callback is not None:
             progress_callback("Zusammenfuegen", 85)

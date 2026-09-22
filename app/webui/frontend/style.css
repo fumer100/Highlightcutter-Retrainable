@@ -337,6 +337,7 @@ select {
   align-items: center;
   justify-content: center;
   z-index: 60;
+  pointer-events: none; /* rein visuell - Buttons darunter (z.B. Abbrechen) bleiben klickbar */
 }
 .busy-overlay.hidden { display: none; }
 .spinner {

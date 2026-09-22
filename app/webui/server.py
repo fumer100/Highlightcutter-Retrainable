@@ -75,6 +75,8 @@ SETTINGS_SCHEMA = [
     ("crf", "CPU CRF (niedriger=besser)", "int", "Qualitaets-Wert fuer CPU-Encoding (14=sehr gut, 18=gut)"),
     ("yolo_sample_every_n_frames", "YOLO: jeden N-ten Frame pruefen", "int", "Performanz: nur jeden N-ten Frame durch YOLO analysieren"),
     ("yolo_confidence", "YOLO: Mindest-Konfidenz", "float", "Mindest-Erkennungssicherheit fuer YOLO-Treffer (0.0-1.0)"),
+    ("yolo_batch_size", "YOLO: Batch-Groesse", "int", "Wie viele Sample-Frames pro GPU-Forward-Pass gebuendelt werden (hoeher = schneller, mehr VRAM)"),
+    ("max_parallel_cuts", "Schneiden: parallele Segmente", "int", "Wie viele Segmente gleichzeitig per ffmpeg geschnitten werden (NVENC-Sessions begrenzen!)"),
 ]
 
 

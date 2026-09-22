@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 import time
+import torch
 from ultralytics import YOLO
 
 from app.dataset.dataset_manager import DatasetManager
@@ -46,10 +47,13 @@ class Trainer:
         if cancel_event is not None:
             model.add_callback("on_train_epoch_end", stop_if_cancelled)
 
+        device = 0 if torch.cuda.is_available() else "cpu"  # 0 = erste CUDA-GPU, explizit statt Auto-Erkennung
+
         results = model.train(
             data=dataset_yaml,
             epochs=epochs,
             imgsz=img_size,
+            device=device,
             project=str(self.version_dir),
             name=f"run_{int(time.time())}"
         )

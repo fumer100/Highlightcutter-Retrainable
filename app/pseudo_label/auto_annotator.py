@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import cv2
+import torch
 
 from ultralytics import YOLO
 
@@ -27,7 +28,8 @@ class AutoAnnotator:
 
         self.dm = dataset_manager
 
-        self.model = YOLO(model_path)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = YOLO(model_path).to(self.device)
 
         self.confidence_threshold = confidence_threshold
 
