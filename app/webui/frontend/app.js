@@ -24,20 +24,34 @@ function classColor(cls) {
 }
 
 // ------------------------------------------------------------
+// Kleiner Fetch-Helfer
+// ------------------------------------------------------------
+
+async function apiGet(path) {
+  const res = await fetch(path);
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return res.json();
+}
+
+// ------------------------------------------------------------
 // Init
 // ------------------------------------------------------------
 
-function whenReady(fn) {
-  if (window.pywebview && window.pywebview.api) fn();
-  else window.addEventListener("pywebviewready", fn);
-}
-
-whenReady(init);
+document.addEventListener("DOMContentLoaded", init);
 
 async function init() {
-  const s = await pywebview.api.get_state();
+  const s = await apiGet("/api/state");
   applyState(s);
   bindEvents();
+  connectEvents();
   if (!s.games.length) {
     showToast("Keine Spiele konfiguriert. Bitte ein Spiel hinzufügen.", "warn");
   }
@@ -53,18 +67,43 @@ function applyState(s) {
 }
 
 // ------------------------------------------------------------
+// Server-Sent-Events: Fortschritt / Log / Status vom Backend
+// ------------------------------------------------------------
+
+function connectEvents() {
+  const es = new EventSource("/api/events");
+  es.onmessage = (e) => {
+    const { event, data } = JSON.parse(e.data);
+    switch (event) {
+      case "log": onLog(data); break;
+      case "progress": onProgress(data.phase, data.percent); break;
+      case "overallProgress": onOverallProgress(data.idx, data.total); break;
+      case "status": onStatus(data); break;
+      case "busy": onBusy(data); break;
+      case "done": onDone(data); break;
+      case "error": onError(data); break;
+      case "cancelled": onCancelled(data); break;
+      case "reviewCount": onReviewCount(data); break;
+    }
+  };
+  es.onerror = () => {
+    // Browser versucht automatisch neu zu verbinden.
+  };
+}
+
+// ------------------------------------------------------------
 // Event-Wiring
 // ------------------------------------------------------------
 
 function bindEvents() {
   document.getElementById("gameDropdown").addEventListener("change", async (e) => {
-    const res = await pywebview.api.select_game(e.target.value);
+    const res = await apiPost("/api/select_game", { name: e.target.value });
     if (res.ok) applyState(res.state);
     else showToast(res.error, "error");
   });
 
   document.getElementById("refreshGamesBtn").addEventListener("click", async () => {
-    const res = await pywebview.api.refresh_games();
+    const res = await apiPost("/api/refresh_games");
     if (res.ok) {
       applyState(res.state);
       showToast(`${res.state.games.length} Spiele geladen.`, "success");
@@ -77,14 +116,14 @@ function bindEvents() {
   document.getElementById("cancelGameBtn").addEventListener("click", closeAddGameModal);
 
   document.getElementById("browseModelBtn").addEventListener("click", async () => {
-    const path = await pywebview.api.browse_model_file();
-    if (path) document.getElementById("newGameModelPath").value = path;
+    const res = await apiPost("/api/pick_files", { kind: "model" });
+    if (res.ok && res.paths.length) document.getElementById("newGameModelPath").value = res.paths[0];
   });
 
   document.getElementById("loadClassesBtn").addEventListener("click", async () => {
-    const path = await pywebview.api.browse_json_file();
-    if (!path) return;
-    const res = await pywebview.api.extract_classes_from_json(path);
+    const picked = await apiPost("/api/pick_files", { kind: "json" });
+    if (!picked.ok || !picked.paths.length) return;
+    const res = await apiPost("/api/extract_classes_from_json", { path: picked.paths[0] });
     if (res.ok) document.getElementById("newGameClasses").value = res.classes.join(", ");
     else showToast(res.error, "error");
   });
@@ -97,7 +136,7 @@ function bindEvents() {
     const classes = document.getElementById("newGameClasses").value
       .split(",").map((c) => c.trim()).filter(Boolean);
 
-    const res = await pywebview.api.add_game(name, modelPath, classes);
+    const res = await apiPost("/api/add_game", { name, modelPath, classes });
     if (res.ok) {
       applyState(res.state);
       closeAddGameModal();
@@ -108,8 +147,8 @@ function bindEvents() {
   });
 
   document.getElementById("selectVideosBtn").addEventListener("click", async () => {
-    const paths = await pywebview.api.select_videos();
-    paths.forEach(addVideo);
+    const res = await apiPost("/api/pick_files", { kind: "video" });
+    if (res.ok) res.paths.forEach(addVideo);
   });
 
   document.getElementById("clearVideosBtn").addEventListener("click", () => {
@@ -124,34 +163,44 @@ function bindEvents() {
 
   document.getElementById("applySettingsBtn").addEventListener("click", async () => {
     const values = collectSettingsValues();
-    const res = await pywebview.api.apply_settings(values);
+    const res = await apiPost("/api/apply_settings", values);
     if (res.ok) showToast("Einstellungen übernommen.", "success");
     else showToast("Ungültige Felder: " + res.errors.join(", "), "error");
   });
 
   document.getElementById("resetSettingsBtn").addEventListener("click", async () => {
-    const res = await pywebview.api.reset_settings();
+    const res = await apiPost("/api/reset_settings");
     renderSettings(res.settingsSchema);
   });
 
   document.getElementById("startBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
     setBusy(true);
-    const res = await pywebview.api.start_processing(state.videos);
+    const res = await apiPost("/api/start_processing", { videos: state.videos });
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   });
 
   document.getElementById("mlPipelineBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
     setBusy(true);
-    const res = await pywebview.api.run_ml_pipeline(state.videos);
+    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos });
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   });
 
   document.getElementById("trainBtn").addEventListener("click", async () => {
     setBusy(true);
-    const res = await pywebview.api.run_training();
+    const res = await apiPost("/api/run_training");
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  });
+
+  document.getElementById("cancelBtn").addEventListener("click", async () => {
+    const res = await apiPost("/api/cancel");
+    if (res.ok) {
+      onStatus("Abbruch wird ausgefuehrt...");
+      showToast("Abbruch angefordert.", "warn");
+    } else {
+      showToast(res.error, "warn");
+    }
   });
 
   document.getElementById("reviewBtn").addEventListener("click", openReview);
@@ -307,7 +356,7 @@ function collectSettingsValues() {
 }
 
 // ------------------------------------------------------------
-// Verarbeitung: Callbacks aus Python (window.evaluate_js)
+// Verarbeitung: Callbacks aus den Server-Sent-Events
 // ------------------------------------------------------------
 
 function onLog(msg) {
@@ -344,6 +393,12 @@ function onError(msg) {
   showToast("Fehler: " + msg, "error");
 }
 
+function onCancelled(msg) {
+  setBusy(false);
+  onStatus("Abgebrochen");
+  showToast(msg || "Vorgang abgebrochen.", "warn");
+}
+
 function onReviewCount(count) {
   updateReviewBadge(count);
 }
@@ -353,6 +408,7 @@ function setBusy(busy) {
   ["startBtn", "mlPipelineBtn", "trainBtn"].forEach((id) => {
     document.getElementById(id).disabled = busy;
   });
+  document.getElementById("cancelBtn").disabled = !busy;
 }
 
 // ------------------------------------------------------------
@@ -396,7 +452,7 @@ let currentImg = new Image();
 let mouseState = { mode: null };
 
 async function openReview() {
-  const res = await pywebview.api.review_open();
+  const res = await apiPost("/api/review/open");
   state.reviewImages = res.images;
   state.classes = res.classes;
   state.reviewIndex = 0;
@@ -456,12 +512,12 @@ function loadReviewImage() {
 
   currentImg = new Image();
   currentImg.onload = async () => {
-    const res = await pywebview.api.review_get_labels(entry.id);
+    const res = await apiGet(`/api/review/labels/${entry.id}`);
     state.reviewBoxes = res.boxes;
     state.selectedBox = null;
     redraw();
   };
-  currentImg.src = entry.url;
+  currentImg.src = `/api/review/image/${entry.id}?t=${Date.now()}`;
 }
 
 function redraw() {
@@ -629,7 +685,7 @@ function bindCanvasEvents() {
 async function saveLabels() {
   const entry = state.reviewImages[state.reviewIndex];
   if (!entry) return;
-  await pywebview.api.review_save_labels(entry.id, state.reviewBoxes);
+  await apiPost(`/api/review/labels/${entry.id}`, { boxes: state.reviewBoxes });
 }
 
 function deleteSelectedBox() {
@@ -643,7 +699,7 @@ function deleteSelectedBox() {
 async function acceptCurrent() {
   const entry = state.reviewImages[state.reviewIndex];
   if (!entry) return;
-  const res = await pywebview.api.review_accept(entry.id);
+  const res = await apiPost(`/api/review/accept/${entry.id}`);
   if (res.ok) removeCurrentFromList();
   else showToast(res.error, "error");
 }
@@ -651,7 +707,7 @@ async function acceptCurrent() {
 async function rejectCurrent() {
   const entry = state.reviewImages[state.reviewIndex];
   if (!entry) return;
-  const res = await pywebview.api.review_reject(entry.id);
+  const res = await apiPost(`/api/review/reject/${entry.id}`);
   if (res.ok) removeCurrentFromList();
   else showToast(res.error, "error");
 }

@@ -40,7 +40,10 @@ def main():
         min_size=(1100, 720),
     )
     api.window = window
-    webview.start()
+    # Renderer explizit auf WebView2 (Chromium) erzwingen - ohne "gui" faellt
+    # pywebview auf manchen Windows-Systemen auf das alte IE-basierte "mshtml"
+    # zurueck, das window.pywebview.api nicht funktionsfaehig bereitstellt.
+    webview.start(gui="edgechromium", debug=True)
 
 
 if __name__ == "__main__":

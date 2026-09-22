@@ -31,13 +31,20 @@ class Trainer:
     # MAIN TRAIN FUNCTION
     # -------------------------
 
-    def train(self, epochs: int = 20, img_size: int = 640):
+    def train(self, epochs: int = 20, img_size: int = 640, cancel_event=None):
 
         print("🚀 Training gestartet...")
 
         dataset_yaml = self._create_dataset_yaml()
 
         model = YOLO(self.model_path)
+
+        def stop_if_cancelled(_trainer):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Training abgebrochen.")
+
+        if cancel_event is not None:
+            model.add_callback("on_train_epoch_end", stop_if_cancelled)
 
         results = model.train(
             data=dataset_yaml,

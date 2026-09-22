@@ -155,7 +155,7 @@ def compute_rms(video_path: str):
     return rms, times
 
 
-def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None) -> set:
+def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> set:
     """
     progress_callback(phase: str, percent: float) wird optional bei
     jedem analysierten Frame mit dem aktuellen Fortschritt (0-100) aufgerufen.
@@ -175,6 +175,10 @@ def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None) ->
 
     print("[YOLO] Analysiere Video ...")
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            cap.release()
+            raise RuntimeError("Vorgang abgebrochen.")
+
         ret, frame = cap.read()
         if not ret:
             break
@@ -600,6 +604,7 @@ def cut_and_concat(
     output_path: str,
     cfg: Config,
     progress_callback=None,
+    cancel_event=None,
 ) -> None:
     if not segments:
         print("Keine Segmente zum Schneiden.")
@@ -609,6 +614,9 @@ def cut_and_concat(
         clip_paths = []
 
         for i, (start, end) in enumerate(segments):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Vorgang abgebrochen.")
+
             clip_path = os.path.join(tmpdir, f"clip_{i:03d}.mp4")
             duration = end - start
 
@@ -631,7 +639,15 @@ def cut_and_concat(
             cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", clip_path]
 
             print(f"[Cut] Segment {i+1}/{len(segments)}: {fmt_time(start)} -> {fmt_time(end)} ({duration:.1f}s)")
-            subprocess.run(cmd, check=True)
+            process = subprocess.Popen(cmd)
+            while process.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    process.terminate()
+                    process.wait()
+                    raise RuntimeError("Vorgang abgebrochen.")
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
+
             subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-select_streams", "a", clip_path], check=True)
             clip_paths.append(clip_path)
 
@@ -652,7 +668,7 @@ def cut_and_concat(
         print("[Concat] Fuege Segmente zusammen ...")
         first_clip_maps = get_stream_maps(clip_paths[0])  # erster Zwischen-Clip als Referenz
 
-        subprocess.run([
+        concat_process = subprocess.Popen([
             "ffmpeg", "-y",
             "-fflags", "+genpts",
             "-f", "concat", "-safe", "0",
@@ -661,7 +677,14 @@ def cut_and_concat(
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
             output_path,
-        ], check=True)
+        ])
+        while concat_process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                concat_process.terminate()
+                concat_process.wait()
+                raise RuntimeError("Vorgang abgebrochen.")
+        if concat_process.returncode != 0:
+            raise subprocess.CalledProcessError(concat_process.returncode, concat_process.args)
 
     print(f"[Done] Gespeichert: {output_path}")
     if progress_callback is not None:
@@ -672,7 +695,7 @@ def cut_and_concat(
 # Hauptablauf
 # ----------------------------------------------------------------------
 
-def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None) -> dict:
+def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> dict:
     """
     progress_callback(phase: str, percent: float) wird optional bei
     den wichtigsten Phasen aufgerufen:
@@ -709,15 +732,20 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
     "output_path": output_path,
     }
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Vorgang abgebrochen.")
+
         duration = get_video_duration(video_path)
         print(f"Video: {video_path}")
         print(f"Video-Laenge: {fmt_time(duration)}")
 
-        yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback)
+        yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback, cancel_event)
         result["yolo_event_times"] = yolo_event_times
         if progress_callback is not None:
             progress_callback("Audio-Analyse", 0.0)
         rms, times = compute_rms(video_path)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Vorgang abgebrochen.")
         if progress_callback is not None:
             progress_callback("Audio-Analyse", 100.0)
 
@@ -790,7 +818,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
             timeline_rows.append((clip_nr, s, e, e - s))
         print(f"Gesamt-Highlight-Laenge: {fmt_time(total)}\n")
 
-        cut_and_concat(video_path, all_segments, output_path, cfg, progress_callback)
+        cut_and_concat(video_path, all_segments, output_path, cfg, progress_callback, cancel_event)
 
         # --- Finale Timeline berechnen (Zeitstempel IM Output-Video) ---
         cumulative = 0.0
