@@ -38,3 +38,10 @@ class PipelineController:
             annotated += 1
             if result["needs_review"]:
                 needs_review += 1
+
+        return {
+            "video": video_path.name,
+            "extracted": len(extracted_samples),
+            "annotated": annotated,
+            "needs_review": needs_review,
+        }

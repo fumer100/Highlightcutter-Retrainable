@@ -1,6 +1,8 @@
 import os
 import io
 import sys
+import json
+import shutil
 import subprocess
 
 if sys.platform == "win32":
@@ -26,7 +28,7 @@ from app.dataset.dataset_manager import DatasetManager
 from app.training.trainer import Trainer 
 from app.cutter.highlight_cutter_pointbased import Config, process_video
 from app.core.pipeline_controller import PipelineController
-from config.games import GAMES, reload_games, GamesConfigError
+from config.games import GAMES, reload_games, GamesConfigError, GAMES_CONFIG_FILE, PROJECT_ROOT
 class QueueWriter(io.TextIOBase):
     def __init__(self, log_queue: queue.Queue, real_stdout):
         self.log_queue = log_queue
@@ -192,6 +194,179 @@ class SettingsWindow(tk.Toplevel):
 
 
 # ----------------------------------------------------------------------
+# Neues Spiel hinzufuegen
+# ----------------------------------------------------------------------
+
+class AddGameWindow(tk.Toplevel):
+    """
+    Formular zum Anlegen eines neuen Spiels: Name, YOLO-Modell (current.pt)
+    und Klassen (manuell oder aus einer JSON-Datei importiert). Schreibt
+    das Ergebnis persistent in config/games.json und legt die passende
+    Ordnerstruktur (models/, datasets/, review_queue/) an.
+    """
+
+    def __init__(self, parent, on_saved):
+        super().__init__(parent)
+        self.title("Neues Spiel hinzufuegen")
+        self.geometry("560x460")
+        self.resizable(False, False)
+        self.on_saved = on_saved
+        self.model_source_path = ""
+
+        self.grab_set()
+
+        pad = {"padx": 12, "pady": 6}
+
+        tk.Label(self, text="Neues Spiel anlegen", font=("", 13, "bold")).pack(anchor="w", **pad)
+
+        # --- Spielname ---
+        name_frame = tk.Frame(self)
+        name_frame.pack(fill="x", **pad)
+        tk.Label(name_frame, text="Spielname:", width=16, anchor="w").pack(side="left")
+        self.name_var = tk.StringVar()
+        tk.Entry(name_frame, textvariable=self.name_var).pack(side="left", fill="x", expand=True)
+
+        # --- Modell ---
+        model_frame = tk.Frame(self)
+        model_frame.pack(fill="x", **pad)
+        tk.Label(model_frame, text="YOLO-Modell (.pt):", width=16, anchor="w").pack(side="left")
+        self.model_var = tk.StringVar()
+        tk.Entry(model_frame, textvariable=self.model_var, state="readonly").pack(side="left", fill="x", expand=True)
+        tk.Button(model_frame, text="Durchsuchen...", command=self._browse_model).pack(side="left", padx=(6, 0))
+
+        # --- Klassen ---
+        tk.Label(self, text="Klassen (kommagetrennt):", anchor="w").pack(fill="x", padx=12)
+        classes_frame = tk.Frame(self)
+        classes_frame.pack(fill="x", padx=12, pady=(0, 6))
+        self.classes_var = tk.StringVar()
+        tk.Entry(classes_frame, textvariable=self.classes_var).pack(side="left", fill="x", expand=True)
+        tk.Button(classes_frame, text="Aus JSON laden...", command=self._load_classes_from_json).pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            self,
+            text='Unterstuetzte JSON-Formate: ["a", "b"]  /  {"classes": [...]}  /  '
+                 '{"names": {...}}  /  {"categories": [{"name": ...}]} (z.B. Label-Studio-Export)',
+            fg="gray", font=("", 8), wraplength=520, justify="left", anchor="w",
+        ).pack(fill="x", padx=12)
+
+        # --- Info: wo abgelegt wird ---
+        self.info_var = tk.StringVar()
+        tk.Label(
+            self, textvariable=self.info_var, fg="gray", font=("", 8),
+            justify="left", anchor="w", wraplength=520,
+        ).pack(fill="x", padx=12, pady=(14, 0))
+        self.name_var.trace_add("write", lambda *_: self._update_info())
+        self._update_info()
+
+        # --- Buttons ---
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=16)
+        tk.Button(btn_frame, text="Speichern", command=self._save, bg="green", fg="white", width=15).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Abbrechen", command=self.destroy, width=15).pack(side="left", padx=5)
+
+    def _update_info(self):
+        name = self.name_var.get().strip() or "<Spielname>"
+        self.info_var.set(
+            "Wird angelegt unter:\n"
+            f"  Modell:        models/{name}/current.pt\n"
+            f"  Dataset:       datasets/{name}\n"
+            f"  Review-Queue:  review_queue/{name}"
+        )
+
+    def _browse_model(self):
+        path = filedialog.askopenfilename(filetypes=[("YOLO-Modell", "*.pt")])
+        if path:
+            self.model_source_path = path
+            self.model_var.set(path)
+
+    def _load_classes_from_json(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            classes = self._extract_classes(data)
+        except Exception as e:
+            messagebox.showerror("Fehler beim Laden", f"Klassen konnten nicht aus der JSON gelesen werden:\n{e}")
+            return
+        self.classes_var.set(", ".join(classes))
+
+    @staticmethod
+    def _extract_classes(data):
+        if isinstance(data, list):
+            classes = data
+        elif isinstance(data, dict):
+            if "classes" in data:
+                classes = data["classes"]
+            elif "names" in data:
+                names = data["names"]
+                classes = list(names.values()) if isinstance(names, dict) else list(names)
+            elif "categories" in data:
+                classes = [c["name"] for c in data["categories"]]
+            else:
+                raise ValueError("Kein 'classes', 'names' oder 'categories' Feld gefunden.")
+        else:
+            raise ValueError("Unerwartetes JSON-Format.")
+
+        classes = [str(c).strip() for c in classes if str(c).strip()]
+        if not classes:
+            raise ValueError("Keine Klassennamen gefunden.")
+        return classes
+
+    def _save(self):
+        name = self.name_var.get().strip()
+        classes_raw = self.classes_var.get().strip()
+
+        if not name:
+            messagebox.showwarning("Hinweis", "Bitte einen Spielnamen eingeben.")
+            return
+        if name in GAMES:
+            messagebox.showwarning("Hinweis", f"Ein Spiel namens '{name}' existiert bereits.")
+            return
+        if not self.model_source_path:
+            messagebox.showwarning("Hinweis", "Bitte ein YOLO-Modell (.pt) auswaehlen.")
+            return
+        if not classes_raw:
+            messagebox.showwarning("Hinweis", "Bitte mindestens eine Klasse angeben.")
+            return
+
+        classes = [c.strip() for c in classes_raw.split(",") if c.strip()]
+        if len(classes) != len(set(classes)):
+            messagebox.showwarning("Hinweis", "Doppelte Klassennamen gefunden.")
+            return
+
+        try:
+            model_dst = PROJECT_ROOT / "models" / name / "current.pt"
+            model_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.model_source_path, model_dst)
+
+            with open(GAMES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+
+            raw.setdefault("games", {})[name] = {
+                "model_path": f"models/{name}/current.pt",
+                "dataset_path": f"datasets/{name}",
+                "review_queue_path": f"review_queue/{name}",
+                "classes": classes,
+            }
+
+            with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(raw, f, indent=2, ensure_ascii=False)
+
+            reload_games()
+            DatasetManager(name)  # legt Ordnerstruktur (images/labels/train/val) sofort an
+
+        except (GamesConfigError, OSError, ValueError) as e:
+            messagebox.showerror("Fehler", f"Spiel konnte nicht gespeichert werden:\n{e}")
+            return
+
+        messagebox.showinfo("Gespeichert", f"Spiel '{name}' wurde hinzugefuegt.")
+        self.on_saved(name)
+        self.destroy()
+
+
+# ----------------------------------------------------------------------
 # Haupt-GUI
 # ----------------------------------------------------------------------
 
@@ -233,7 +408,11 @@ class HighlightCutterGUI:
             command=self.refresh_games
         ).pack(side="left", padx=2)
 
-        self._refresh_game_dropdown()
+        tk.Button(
+            model_frame, text="➕ Spiel hinzufuegen",
+            command=self.open_add_game
+        ).pack(side="left", padx=(8, 2))
+
         self._refresh_game_dropdown()
 
         tk.Label(root, text="Videos").pack(pady=5)
@@ -352,6 +531,15 @@ class HighlightCutterGUI:
         self._pipeline_controllers.clear()
         self._refresh_game_dropdown()
         messagebox.showinfo("Aktualisiert", f"{len(GAMES)} Spiele geladen.")
+
+    def open_add_game(self):
+        AddGameWindow(self.root, on_saved=self._on_game_added)
+
+    def _on_game_added(self, game_name: str):
+        self._dataset_managers.clear()
+        self._pipeline_controllers.clear()
+        self._refresh_game_dropdown()
+        self.model_var.set(game_name)
 
     def _current_game_name(self):
         return self.model_var.get()

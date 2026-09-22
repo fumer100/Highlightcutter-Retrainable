@@ -90,7 +90,7 @@ class Config:
     audio_pre_buffer_sec: float = 1.5       # Pre-Buffer wenn Cluster mit Audio-Peak beginnt
     yolo_pre_buffer_sec: float = 1.5        # Pre-Buffer wenn Cluster mit YOLO-Event beginnt
 
-    base_post_buffer_sec: float = 0.825      # Basis-Nachlaufzeit nach letztem Punkt im Cluster
+    base_post_buffer_sec: float = 1.25      # Basis-Nachlaufzeit nach letztem Punkt im Cluster
 
     # Lautstaerke-abhaengiges Wachstum (bezieht sich auf das GESAMTE,
     # bereits fusionierte Cluster-Fenster, iterativ berechnet)
@@ -932,30 +932,34 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 # ----------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
     from datetime import datetime
 
-    config = Config(
-        yolo_model_path=r"D:\YOLO_Training\runs\hitmarkerEvents\weights\best.pt",
-    )
+    parser = argparse.ArgumentParser(description="Schneidet ein einzelnes Highlight-Video (Stand-alone-Aufruf ohne GUI).")
+    parser.add_argument("video_path", help="Pfad zum Quellvideo")
+    parser.add_argument("--yolo-model", default=r"D:\YOLO_Training\runs\hitmarkerEvents\weights\best.pt", help="Pfad zum YOLO-Modell")
+    parser.add_argument("--output-dir", default=r"D:\EDITED CLIPS\Skript Cutted", help="Basis-Verzeichnis fuer die fertigen Schnitte")
+    args = parser.parse_args()
 
-    # 1. Basis-Verzeichnis für deine fertigen Schnitte
-    base_output_dir = r"D:\EDITED CLIPS\Skript Cutted"
-    
-    # 2. Präziser Zeitstempel inklusive Sekunden und Millisekunden (%f)
+    if not os.path.isfile(args.video_path):
+        raise FileNotFoundError(f"Video nicht gefunden: {args.video_path}")
+
+    config = Config(yolo_model_path=args.yolo_model)
+
+    # Präziser Zeitstempel inklusive Sekunden und Millisekunden (%f)
     # Erzeugt z. B.: "2026-06-20_12-45-30_102" (Jahr-Monat-Tag_Stunde-Minute-Sekunde_Millisekunde)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
-    
-    # 3. Den neuen, absolut einzigartigen Unterordner definieren und erstellen
-    target_folder = os.path.join(base_output_dir, f"Render_{timestamp}")
+
+    # Den neuen, absolut einzigartigen Unterordner definieren und erstellen
+    target_folder = os.path.join(args.output_dir, f"Render_{timestamp}")
     os.makedirs(target_folder, exist_ok=True)
-    
-    # 4. Auch die Videodatei bekommt den Zeitstempel im Namen
+
+    # Auch die Videodatei bekommt den Zeitstempel im Namen
     video_filename = f"Highlight_Video_{timestamp}.mp4"
     dynamic_output_path = os.path.join(target_folder, video_filename)
 
-    # Start für das Einzelvideo
     process_video(
-        video_path=r"D:\OBS CLIPS\Alle Aufnahmen\2026-06-27 09-06-15.mkv",
+        video_path=args.video_path,
         output_path=dynamic_output_path,
         cfg=config,
     )

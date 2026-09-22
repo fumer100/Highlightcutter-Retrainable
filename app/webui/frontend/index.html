@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Highlight Cutter</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<header class="topbar">
+  <div class="brand">🎬 <span>Highlight Cutter</span></div>
+  <div class="game-select">
+    <label for="gameDropdown">Spiel</label>
+    <select id="gameDropdown"></select>
+    <button id="refreshGamesBtn" class="icon-btn" title="Spiele neu laden">🔄</button>
+    <button id="addGameBtn" class="btn btn-outline">➕ Spiel hinzufügen</button>
+  </div>
+</header>
+
+<main id="mainView" class="view">
+  <div class="grid">
+    <section class="panel videos-panel">
+      <div class="panel-header">
+        <h2>Videos</h2>
+        <div class="panel-actions">
+          <button id="selectVideosBtn" class="btn">Videos auswählen</button>
+          <button id="clearVideosBtn" class="btn btn-outline">Liste leeren</button>
+        </div>
+      </div>
+      <ul id="videoList" class="video-list"></ul>
+    </section>
+
+    <section class="panel settings-panel">
+      <div class="panel-header collapsible" id="settingsToggle">
+        <h2>Einstellungen</h2>
+        <span class="chevron">▾</span>
+      </div>
+      <div id="settingsBody" class="settings-body"></div>
+      <div class="panel-actions">
+        <button id="applySettingsBtn" class="btn">Übernehmen</button>
+        <button id="resetSettingsBtn" class="btn btn-outline">Zurücksetzen</button>
+      </div>
+    </section>
+  </div>
+
+  <section class="panel actions-panel">
+    <div class="panel-header"><h2>Aktionen</h2></div>
+    <div class="action-buttons">
+      <button id="startBtn" class="btn btn-primary">▶ Start (nur schneiden)</button>
+      <button id="mlPipelineBtn" class="btn btn-success">🚀 Process + ML Pipeline</button>
+      <button id="trainBtn" class="btn btn-info">🧠 Train Model</button>
+      <button id="reviewBtn" class="btn btn-warning">🧾 Review Queue (0)</button>
+    </div>
+
+    <div class="progress-block">
+      <div class="progress-label">Gesamt-Fortschritt (Video X von Y)</div>
+      <div class="progress-bar"><div id="overallProgress" class="progress-fill"></div></div>
+    </div>
+    <div class="progress-block">
+      <div class="progress-label" id="phaseLabel">Phase: -</div>
+      <div class="progress-bar"><div id="subProgress" class="progress-fill"></div></div>
+    </div>
+    <div class="status-line" id="statusLine">Bereit</div>
+  </section>
+
+  <section class="panel log-panel">
+    <div class="panel-header"><h2>Live-Log</h2></div>
+    <pre id="logConsole" class="log-console"></pre>
+  </section>
+</main>
+
+<main id="reviewView" class="view hidden">
+  <div class="review-toolbar">
+    <button id="backToMainBtn" class="btn btn-outline">← Zurück</button>
+    <div id="reviewCounter" class="review-counter">Bild 0 / 0</div>
+    <div id="classButtons" class="class-buttons"></div>
+    <div class="review-actions">
+      <button id="acceptBtn" class="btn btn-success">Accept (A)</button>
+      <button id="rejectBtn" class="btn btn-danger">Reject (D)</button>
+      <button id="deleteBoxBtn" class="btn btn-outline">Delete Box (Del)</button>
+      <button id="prevBtn" class="btn btn-outline">◀ Prev</button>
+      <button id="nextBtn" class="btn btn-outline">Next ▶</button>
+    </div>
+  </div>
+  <div class="review-canvas-wrap">
+    <canvas id="reviewCanvas" width="1000" height="600"></canvas>
+  </div>
+</main>
+
+<div id="addGameModal" class="modal hidden">
+  <div class="modal-content">
+    <h2>Neues Spiel anlegen</h2>
+
+    <div class="form-row">
+      <label>Spielname</label>
+      <input type="text" id="newGameName" placeholder="z.B. Call of Duty">
+    </div>
+
+    <div class="form-row">
+      <label>YOLO-Modell (.pt)</label>
+      <div class="input-with-btn">
+        <input type="text" id="newGameModelPath" readonly placeholder="current.pt auswählen...">
+        <button id="browseModelBtn" class="btn btn-outline">Durchsuchen...</button>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label>Klassen (kommagetrennt)</label>
+      <div class="input-with-btn">
+        <input type="text" id="newGameClasses" placeholder="event, hitmarker">
+        <button id="loadClassesBtn" class="btn btn-outline">Aus JSON laden...</button>
+      </div>
+      <small>Unterstützte JSON-Formate: ["a","b"] / {"classes":[...]} / {"names":{...}} / {"categories":[{"name":...}]}</small>
+    </div>
+
+    <div class="form-row info-row" id="newGamePathsInfo"></div>
+
+    <div class="modal-actions">
+      <button id="saveGameBtn" class="btn btn-primary">Speichern</button>
+      <button id="cancelGameBtn" class="btn btn-outline">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<div id="busyOverlay" class="busy-overlay hidden">
+  <div class="spinner"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

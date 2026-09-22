@@ -1,5 +1,5 @@
 from pathlib import Path
-from Lib import json
+import json
 import cv2
 
 from ultralytics import YOLO

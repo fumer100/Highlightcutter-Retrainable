@@ -43,7 +43,7 @@ class Pipeline:
         # 1. Frames extrahieren
         print("📦 Extrahiere Frames...")
 
-        self.frame_extractor.extract_from_video(
+        extracted_samples = self.frame_extractor.extract_from_video(
             video_path=video_path,
             event_timestamps=events
         )
@@ -51,15 +51,9 @@ class Pipeline:
         # 2. Pseudo Labels erzeugen
         print("🧠 Erstelle Pseudo Labels...")
 
-        review_images = list(self.dm.review_images.glob("*.jpg"))
+        for sample_id in extracted_samples:
 
-        for img in review_images:
-
-            self.annotator.annotate_frame(
-                image_path=str(img),
-                video_name=video_path,
-                frame_number=0
-            )
+            self.annotator.annotate_sample(sample_id=sample_id)
 
         print("📊 Pseudo Labeling abgeschlossen")
 
