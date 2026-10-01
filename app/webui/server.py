@@ -79,7 +79,9 @@ SETTINGS_SCHEMA = [
     ("max_parallel_cuts", "Schneiden: parallele Segmente", "int", "Wie viele Segmente gleichzeitig per ffmpeg geschnitten werden (NVENC-Sessions begrenzen!)"),
     ("scoring_mode", "Wertigkeits-Scoring", "choice", "legacy = nur Lautstaerke-Heuristik, llm = LLM entscheidet rein/raus"),
     ("min_worthiness_score", "Mindest-Wertigkeitsscore (0-100)", "float", "Fenster mit LLM-Score darunter werden verworfen (nur bei scoring_mode=llm)"),
-    ("llm_model", "LLM-Modell", "text", "Modellname fuer das Scoring, z.B. gpt-4o-mini (Aufruf ueber OPENAI_API_KEY-Umgebungsvariable)"),
+    ("llm_provider", "LLM-Anbieter", "choice", "ollama = komplett lokal (empfohlen, kein API-Key), openai = Cloud (braucht OPENAI_API_KEY)"),
+    ("llm_model", "LLM-Modell", "text", "Bei Ollama z.B. 'llama3.1:8b' (muss vorher per 'ollama pull' geladen sein), bei OpenAI z.B. 'gpt-4o-mini'"),
+    ("ollama_base_url", "Ollama-Server-URL", "text", "Nur relevant bei llm_provider=ollama, Standard: http://localhost:11434/v1"),
     ("llm_batch_size", "LLM: Fenster pro Anfrage", "int", "Wie viele Kandidaten-Fenster pro LLM-Aufruf gebuendelt werden"),
     ("enable_speech_to_text", "Speech-to-Text aktiv", "bool", "Audiospur transkribieren, damit das LLM Humor/Kommentare mitbewerten kann"),
     ("whisper_model_size", "Whisper-Modellgroesse", "choice", "Groesser = genauer aber langsamer (tiny/base/small/medium/large-v3)"),
@@ -88,6 +90,7 @@ SETTINGS_SCHEMA = [
 
 CHOICE_OPTIONS = {
     "scoring_mode": ["legacy", "llm"],
+    "llm_provider": ["ollama", "openai"],
     "whisper_model_size": ["tiny", "base", "small", "medium", "large-v3"],
 }
 

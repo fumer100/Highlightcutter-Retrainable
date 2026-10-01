@@ -155,7 +155,9 @@ class Config:
     # --- Phase E: LLM-Wertigkeits-Scoring (ersetzt/ergaenzt Lautstaerke-Heuristik) ---
     scoring_mode: str = "legacy"  # "legacy" (nur Heuristik) | "llm" (LLM entscheidet rein/raus)
     min_worthiness_score: float = 55.0  # Mindest-Score (0-100), sonst wird das Fenster verworfen
-    llm_model: str = "gpt-4o-mini"
+    llm_provider: str = "ollama"  # "ollama" (lokal, Standard) | "openai" (Cloud, braucht OPENAI_API_KEY)
+    llm_model: str = "llama3.1:8b"
+    ollama_base_url: str = "http://localhost:11434/v1"
     llm_batch_size: int = 25  # wie viele Fenster pro LLM-Anfrage gebuendelt werden
 
     # --- Speech-to-Text (Kontext fuer Humor-/Interessantheits-Bewertung) ---
@@ -553,8 +555,14 @@ def score_and_filter_windows(
         for w in windows
     ]
 
-    print(f"\n[Scoring] Bewerte {len(payloads)} Fenster per LLM ({cfg.llm_model}) ...")
-    results = _llm_score_windows(payloads, llm_model=cfg.llm_model, batch_size=cfg.llm_batch_size)
+    print(f"\n[Scoring] Bewerte {len(payloads)} Fenster per LLM ({cfg.llm_provider}/{cfg.llm_model}) ...")
+    results = _llm_score_windows(
+        payloads,
+        llm_model=cfg.llm_model,
+        batch_size=cfg.llm_batch_size,
+        provider=cfg.llm_provider,
+        ollama_base_url=cfg.ollama_base_url,
+    )
 
     kept = []
     for w, r in zip(windows, results):
