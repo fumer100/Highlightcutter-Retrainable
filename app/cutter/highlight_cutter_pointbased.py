@@ -50,15 +50,28 @@ ffmpeg muss installiert und im PATH verfuegbar sein.
 
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import queue
 import concurrent.futures
+from pathlib import Path
 from dataclasses import dataclass, field
 import json
 import numpy as np
 import librosa
 import torch
+
+# Root-Verzeichnis auf sys.path, damit 'app.scoring...' auch beim direkten
+# Aufruf dieser Datei (python app/cutter/highlight_cutter_pointbased.py ...)
+# aufloesbar ist, nicht nur beim Import ueber die Web-UI.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from app.scoring.transcriber import transcribe_audio
+from app.scoring.worthiness_scorer import score_windows as _llm_score_windows
+
 print("=" * 40)
 print(f"PyTorch Version: {torch.__version__}")
 print(f"CUDA verfügbar?: {torch.cuda.is_available()}")
@@ -138,6 +151,17 @@ class Config:
     crf: int = 14
     nvenc_cq: int = 15
     max_parallel_cuts: int = 3  # wie viele Segmente gleichzeitig per ffmpeg geschnitten werden
+
+    # --- Phase E: LLM-Wertigkeits-Scoring (ersetzt/ergaenzt Lautstaerke-Heuristik) ---
+    scoring_mode: str = "legacy"  # "legacy" (nur Heuristik) | "llm" (LLM entscheidet rein/raus)
+    min_worthiness_score: float = 55.0  # Mindest-Score (0-100), sonst wird das Fenster verworfen
+    llm_model: str = "gpt-4o-mini"
+    llm_batch_size: int = 25  # wie viele Fenster pro LLM-Anfrage gebuendelt werden
+
+    # --- Speech-to-Text (Kontext fuer Humor-/Interessantheits-Bewertung) ---
+    enable_speech_to_text: bool = False
+    whisper_model_size: str = "small"  # tiny|base|small|medium|large-v3
+    whisper_language: str | None = None  # None = Auto-Erkennung
 
 
 def fmt_time(sec: float) -> str:
@@ -481,6 +505,77 @@ def merge_windows(windows: list[dict], gap_sec: float) -> list[dict]:
 
 
 # ----------------------------------------------------------------------
+# Phase E: LLM-Wertigkeits-Scoring (ersetzt/ergaenzt die Lautstaerke-Heuristik)
+# ----------------------------------------------------------------------
+
+def _transcript_excerpt(transcript_segments: list, start: float, end: float) -> str:
+    parts = [seg.text for seg in transcript_segments if seg.end >= start and seg.start <= end]
+    return " ".join(parts).strip()
+
+
+def _build_scoring_payload(
+    window: dict,
+    rms: np.ndarray,
+    times: np.ndarray,
+    transcript_segments: list,
+    game_name: str | None,
+    game_context: dict | None,
+) -> dict:
+    start, end = window["start"], window["end"]
+    mask = (times >= start) & (times <= end)
+    window_rms = rms[mask]
+    loud_threshold = np.percentile(rms, 75.0)
+    loud_ratio = float(np.mean(window_rms >= loud_threshold)) if len(window_rms) else 0.0
+
+    return {
+        "game": game_name or "unbekannt",
+        "game_glossary": game_context or {},
+        "duration_sec": round(end - start, 2),
+        "cluster_size": window["cluster_size"],
+        "point_types": window["point_types"],
+        "loud_ratio_in_window": round(loud_ratio, 3),
+        "transcript": _transcript_excerpt(transcript_segments, start, end),
+    }
+
+
+def score_and_filter_windows(
+    windows: list[dict],
+    rms: np.ndarray,
+    times: np.ndarray,
+    transcript_segments: list,
+    cfg: Config,
+    game_name: str | None = None,
+    game_context: dict | None = None,
+) -> list[dict]:
+    """Bewertet jedes Fenster per LLM und verwirft alles unter min_worthiness_score."""
+    payloads = [
+        _build_scoring_payload(w, rms, times, transcript_segments, game_name, game_context)
+        for w in windows
+    ]
+
+    print(f"\n[Scoring] Bewerte {len(payloads)} Fenster per LLM ({cfg.llm_model}) ...")
+    results = _llm_score_windows(payloads, llm_model=cfg.llm_model, batch_size=cfg.llm_batch_size)
+
+    kept = []
+    for w, r in zip(windows, results):
+        w = dict(w)
+        w["worthiness_score"] = r["score"]
+        w["humor_score"] = r["humor_score"]
+        w["interest_score"] = r["interest_score"]
+        w["score_reason"] = r["reason"]
+
+        tag = "BEHALTEN" if r["score"] >= cfg.min_worthiness_score else "VERWORFEN"
+        print(f"  [Scoring] {tag} score={r['score']:.0f} (humor={r['humor_score']:.0f}, "
+              f"interesse={r['interest_score']:.0f}) {fmt_time(w['start'])} -> {fmt_time(w['end'])} - {r['reason']}")
+
+        if r["score"] >= cfg.min_worthiness_score:
+            kept.append(w)
+
+    print(f"[Scoring] {len(kept)}/{len(windows)} Fenster behalten (Mindest-Score {cfg.min_worthiness_score}).")
+    return kept
+
+
+# ----------------------------------------------------------------------
 # Stufe 2: Interne Lücken entfernen (identisch zum linearen Skript)
 # ----------------------------------------------------------------------
 
@@ -787,14 +882,20 @@ def cut_and_concat(
 # Hauptablauf
 # ----------------------------------------------------------------------
 
-def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> dict:
+def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None, cancel_event=None,
+                   game_name: str | None = None, game_context: dict | None = None) -> dict:
     """
     progress_callback(phase: str, percent: float) wird optional bei
     den wichtigsten Phasen aufgerufen:
       "YOLO-Analyse"   (0-100, pro Frame)
       "Audio-Analyse"  (0/100, da nicht granular messbar)
+      "Transkription"  (0-100, nur wenn enable_speech_to_text aktiv)
       "Schneiden"      (0-80, pro Segment)
       "Zusammenfuegen" (85/100)
+
+    game_name/game_context: optional - Spielname + Klassen-Glossar fuer das
+    LLM-Scoring (cfg.scoring_mode == "llm"). Ohne diese Angaben bewertet das
+    LLM ohne Spiel-Kontext.
     """
     import io, sys
 
@@ -863,6 +964,32 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         # --- Phase D: Merge ---
         merged_windows = merge_windows(windows, cfg.merge_gap_sec)
 
+        # --- Phase E: LLM-Wertigkeits-Scoring (optional) ---
+        if cfg.scoring_mode == "llm":
+            transcript_segments = []
+            if cfg.enable_speech_to_text:
+                if progress_callback is not None:
+                    progress_callback("Transkription", 0.0)
+                transcript_segments = transcribe_audio(
+                    video_path,
+                    model_size=cfg.whisper_model_size,
+                    language=cfg.whisper_language,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("Vorgang abgebrochen.")
+
+            merged_windows = score_and_filter_windows(
+                merged_windows, rms, times, transcript_segments, cfg,
+                game_name=game_name, game_context=game_context,
+            )
+
+            if not merged_windows:
+                print("Nach Wertigkeits-Scoring keine Fenster mehr uebrig.")
+                sys.stdout = original_stdout
+                return result
+
         # --- Stufe 2: interne Luecken pro Fenster entfernen ---
         all_segments = []
         segment_origin = []
@@ -874,6 +1001,11 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
             phase_reason = (f"Cluster-Groesse: {w['cluster_size']} Punkt(e) [{', '.join(w['point_types'])}] | "
                              f"Start-Trigger: {w['start_reason']} | "
                              f"End-Berechnung: {w['end_reason']}")
+
+            if "worthiness_score" in w:
+                phase_reason += (f" | LLM-Score: {w['worthiness_score']:.0f} "
+                                  f"(Humor {w['humor_score']:.0f}, Interesse {w['interest_score']:.0f}) - "
+                                  f"{w['score_reason']}")
 
             for sub_idx, seg in enumerate(sub_segments, start=1):
                 all_segments.append(seg)
@@ -962,6 +1094,19 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
             except Exception:
                 pass
 
+            llm_worthiness_score = llm_humor_score = llm_interest_score = None
+            llm_score_reason = None
+            try:
+                if "LLM-Score:" in origin:
+                    llm_part = origin.split("LLM-Score:")[1]
+                    llm_worthiness_score = float(llm_part.split("(")[0].strip())
+                    llm_humor_score = float(llm_part.split("Humor")[1].split(",")[0].strip())
+                    llm_interest_score = float(llm_part.split("Interesse")[1].split(")")[0].strip())
+                    if ") - " in llm_part:
+                        llm_score_reason = llm_part.split(") - ", 1)[1].strip()
+            except Exception:
+                pass
+
             yolo_count = point_types.count("yolo")
             audio_count = point_types.count("audio")
 
@@ -993,6 +1138,12 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
                     "audio_count": audio_count,
 
                     "score": round(score, 3),
+
+                    # LLM-Wertigkeits-Scoring (nur gefuellt wenn cfg.scoring_mode == "llm")
+                    "llm_worthiness_score": llm_worthiness_score,
+                    "llm_humor_score": llm_humor_score,
+                    "llm_interest_score": llm_interest_score,
+                    "llm_score_reason": llm_score_reason,
 
                     "origin": origin,
                 }

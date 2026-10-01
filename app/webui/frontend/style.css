@@ -198,6 +198,15 @@ select {
   border-radius: 5px;
   padding: 4px 6px;
 }
+.setting-row input[type="text"],
+.setting-row select {
+  width: 140px;
+  background: var(--bg-alt);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 4px 6px;
+}
 .setting-row input[type="checkbox"] { width: 18px; height: 18px; }
 .setting-row small { color: var(--text-dim); font-size: 11px; }
 

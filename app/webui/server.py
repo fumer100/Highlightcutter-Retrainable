@@ -77,7 +77,19 @@ SETTINGS_SCHEMA = [
     ("yolo_confidence", "YOLO: Mindest-Konfidenz", "float", "Mindest-Erkennungssicherheit fuer YOLO-Treffer (0.0-1.0)"),
     ("yolo_batch_size", "YOLO: Batch-Groesse", "int", "Wie viele Sample-Frames pro GPU-Forward-Pass gebuendelt werden (hoeher = schneller, mehr VRAM)"),
     ("max_parallel_cuts", "Schneiden: parallele Segmente", "int", "Wie viele Segmente gleichzeitig per ffmpeg geschnitten werden (NVENC-Sessions begrenzen!)"),
+    ("scoring_mode", "Wertigkeits-Scoring", "choice", "legacy = nur Lautstaerke-Heuristik, llm = LLM entscheidet rein/raus"),
+    ("min_worthiness_score", "Mindest-Wertigkeitsscore (0-100)", "float", "Fenster mit LLM-Score darunter werden verworfen (nur bei scoring_mode=llm)"),
+    ("llm_model", "LLM-Modell", "text", "Modellname fuer das Scoring, z.B. gpt-4o-mini (Aufruf ueber OPENAI_API_KEY-Umgebungsvariable)"),
+    ("llm_batch_size", "LLM: Fenster pro Anfrage", "int", "Wie viele Kandidaten-Fenster pro LLM-Aufruf gebuendelt werden"),
+    ("enable_speech_to_text", "Speech-to-Text aktiv", "bool", "Audiospur transkribieren, damit das LLM Humor/Kommentare mitbewerten kann"),
+    ("whisper_model_size", "Whisper-Modellgroesse", "choice", "Groesser = genauer aber langsamer (tiny/base/small/medium/large-v3)"),
+    ("whisper_language", "Whisper-Sprache (leer = Auto)", "text", "Sprachcode wie 'de' oder 'en', leer lassen fuer automatische Erkennung"),
 ]
+
+CHOICE_OPTIONS = {
+    "scoring_mode": ["legacy", "llm"],
+    "whisper_model_size": ["tiny", "base", "small", "medium", "large-v3"],
+}
 
 
 class _LogStream:
@@ -154,7 +166,8 @@ class Core:
             "modelPath": model_path,
             "reviewCount": review_count,
             "settingsSchema": [
-                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a)}
+                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
+                 "options": CHOICE_OPTIONS.get(a)}
                 for (a, l, t, d) in SETTINGS_SCHEMA
             ],
         }
@@ -192,8 +205,11 @@ class Core:
                     setattr(self.cfg, attr, bool(raw))
                 elif typ == "int":
                     setattr(self.cfg, attr, int(raw))
-                else:
+                elif typ == "float":
                     setattr(self.cfg, attr, float(raw))
+                else:  # "text" | "choice"
+                    text = str(raw).strip()
+                    setattr(self.cfg, attr, (text or None) if attr == "whisper_language" else text)
             except (ValueError, TypeError):
                 errors.append(attr)
 
@@ -206,7 +222,8 @@ class Core:
         return {
             "ok": True,
             "settingsSchema": [
-                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a)}
+                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
+                 "options": CHOICE_OPTIONS.get(a)}
                 for (a, l, t, d) in SETTINGS_SCHEMA
             ],
         }
@@ -347,6 +364,8 @@ class Core:
                     cfg=self.cfg,
                     progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
                     cancel_event=cancel_event,
+                    game_name=self.current_game,
+                    game_context=self._dm().game.llm_context,
                 )
                 self._push("overallProgress", {"idx": idx, "total": total})
 
@@ -392,6 +411,8 @@ class Core:
                     cfg=self.cfg,
                     progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
                     cancel_event=cancel_event,
+                    game_name=self.current_game,
+                    game_context=self._dm().game.llm_context,
                 )
 
                 stats = self._pc().run_full_cycle(video_path=video, events=result["yolo_event_times"])

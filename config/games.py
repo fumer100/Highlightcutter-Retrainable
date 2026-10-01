@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 
@@ -14,6 +14,7 @@ class Game:
     dataset_path: Path
     review_queue_path: Path
     classes: list[str]
+    llm_context: dict = field(default_factory=dict)  # Klasse -> Erklaerungstext fuers LLM-Scoring
 
 
 REQUIRED_FIELDS = ["model_path", "dataset_path", "review_queue_path", "classes"]
@@ -64,6 +65,18 @@ def _validate_game_entry(name: str, cfg: dict):
             f"Spiel '{name}': doppelte Klassennamen gefunden: {set(duplicates)}"
         )
 
+    llm_context = cfg.get("llm_context")
+    if llm_context is not None:
+        if not isinstance(llm_context, dict):
+            raise GamesConfigError(
+                f"Spiel '{name}': 'llm_context' muss ein Objekt (Klasse -> Text) sein."
+            )
+        for cls_name, text in llm_context.items():
+            if not isinstance(text, str):
+                raise GamesConfigError(
+                    f"Spiel '{name}': 'llm_context.{cls_name}' muss Text sein."
+                )
+
 
 def _load_games() -> dict[str, Game]:
     if not GAMES_CONFIG_FILE.exists():
@@ -99,6 +112,7 @@ def _load_games() -> dict[str, Game]:
             dataset_path=PROJECT_ROOT / cfg["dataset_path"],
             review_queue_path=PROJECT_ROOT / cfg["review_queue_path"],
             classes=cfg["classes"],
+            llm_context=cfg.get("llm_context", {}),
         )
 
     return games

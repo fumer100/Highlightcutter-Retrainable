@@ -7,7 +7,11 @@
       "classes": [
         "event",
         "hitmarker"
-      ]
+      ],
+      "llm_context": {
+        "event": "Seltenes, starkes Signal - meist ein besonderer Moment (Teamwipe, Cashout, Highlight-Kill).",
+        "hitmarker": "Haeufiges, schwaches Signal - normaler Treffer im Kampf, allein meist kein Highlight."
+      }
     },
     "Battlefield 6": {
       "model_path": "models/BF6/current.pt",
@@ -15,7 +19,10 @@
       "review_queue_path": "review_queue/BF6",
       "classes": [
         "Kill/Assist"
-      ]
+      ],
+      "llm_context": {
+        "Kill/Assist": "Einziges Signal - je mehr davon dicht beieinander, desto wertvoller (Mehrfach-Kill/Serie)."
+      }
     }
   }
 }

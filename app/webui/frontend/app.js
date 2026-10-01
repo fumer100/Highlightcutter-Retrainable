@@ -328,6 +328,19 @@ function renderSettings(schema) {
       input = document.createElement("input");
       input.type = "checkbox";
       input.checked = !!item.value;
+    } else if (item.type === "choice") {
+      input = document.createElement("select");
+      (item.options || []).forEach((opt) => {
+        const optionEl = document.createElement("option");
+        optionEl.value = opt;
+        optionEl.textContent = opt;
+        if (opt === item.value) optionEl.selected = true;
+        input.appendChild(optionEl);
+      });
+    } else if (item.type === "text") {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = item.value ?? "";
     } else {
       input = document.createElement("input");
       input.type = "number";
@@ -350,6 +363,7 @@ function collectSettingsValues() {
   const values = {};
   document.querySelectorAll("#settingsBody [data-attr]").forEach((input) => {
     if (input.dataset.type === "bool") values[input.dataset.attr] = input.checked;
+    else if (input.dataset.type === "choice" || input.dataset.type === "text") values[input.dataset.attr] = input.value;
     else values[input.dataset.attr] = parseFloat(input.value);
   });
   return values;
