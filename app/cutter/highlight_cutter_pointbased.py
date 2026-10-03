@@ -71,6 +71,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from app.scoring.transcriber import transcribe_audio
 from app.scoring.worthiness_scorer import score_windows as _llm_score_windows
+from app.export.fcpxml_exporter import build_fcpxml
 
 print("=" * 40)
 print(f"PyTorch Version: {torch.__version__}")
@@ -158,7 +159,7 @@ class Config:
     llm_provider: str = "ollama"  # "ollama" (lokal, Standard) | "openai" (Cloud, braucht OPENAI_API_KEY)
     llm_model: str = "llama3.1:8b"
     ollama_base_url: str = "http://localhost:11434/v1"
-    llm_batch_size: int = 25  # wie viele Fenster pro LLM-Anfrage gebuendelt werden
+    llm_batch_size: int = 10  # wie viele Fenster pro LLM-Anfrage gebuendelt werden (kleiner = zuverlaessigeres JSON bei lokalen 8B-Modellen)
 
     # --- Speech-to-Text (Kontext fuer Humor-/Interessantheits-Bewertung) ---
     enable_speech_to_text: bool = False
@@ -726,6 +727,36 @@ def get_video_duration(video_path: str) -> float:
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return float(result.stdout.strip())
 
+
+def get_video_fps(video_path: str) -> tuple[int, int]:
+    """Gibt (Zaehler, Nenner) der Framerate zurueck, z.B. (30000, 1001) fuer 29.97fps."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    raw = result.stdout.strip()
+    if "/" in raw:
+        num_str, den_str = raw.split("/", 1)
+        return int(num_str), int(den_str)
+    return int(round(float(raw))), 1
+
+
+def get_video_resolution(video_path: str) -> tuple[int, int]:
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    width_str, height_str = result.stdout.strip().split("x")
+    return int(width_str), int(height_str)
+
 import subprocess
 import json
 
@@ -890,20 +921,16 @@ def cut_and_concat(
 # Hauptablauf
 # ----------------------------------------------------------------------
 
-def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None, cancel_event=None,
-                   game_name: str | None = None, game_context: dict | None = None) -> dict:
+def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, cancel_event=None,
+                       game_name: str | None = None, game_context: dict | None = None) -> dict:
     """
-    progress_callback(phase: str, percent: float) wird optional bei
-    den wichtigsten Phasen aufgerufen:
-      "YOLO-Analyse"   (0-100, pro Frame)
-      "Audio-Analyse"  (0/100, da nicht granular messbar)
-      "Transkription"  (0-100, nur wenn enable_speech_to_text aktiv)
-      "Schneiden"      (0-80, pro Segment)
-      "Zusammenfuegen" (85/100)
+    Gemeinsame Erkennungs-/Scoring-/Trimming-Pipeline (Phase A-E + Stufe 2/3),
+    OHNE das Video zu schneiden. Wird von process_video() (schneidet
+    anschliessend per ffmpeg) und export_fcpxml_timeline() (schreibt
+    stattdessen eine FCPXML-Timeline) gemeinsam genutzt.
 
-    game_name/game_context: optional - Spielname + Klassen-Glossar fuer das
-    LLM-Scoring (cfg.scoring_mode == "llm"). Ohne diese Angaben bewertet das
-    LLM ohne Spiel-Kontext.
+    Gibt ein dict zurueck: yolo_event_times, all_segments, intro_metadata,
+    timeline_rows, final_timeline_rows, log_text.
     """
     import io, sys
 
@@ -927,11 +954,15 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
     timeline_rows = []
     final_timeline_rows = []
-    result = {
-    "yolo_event_times": [],
-    "intro_metadata": [],
-    "output_path": output_path,
+    empty_result = {
+        "yolo_event_times": [],
+        "all_segments": [],
+        "intro_metadata": [],
+        "timeline_rows": [],
+        "final_timeline_rows": [],
+        "log_text": "",
     }
+
     try:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Vorgang abgebrochen.")
@@ -941,7 +972,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         print(f"Video-Laenge: {fmt_time(duration)}")
 
         yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback, cancel_event)
-        result["yolo_event_times"] = yolo_event_times
+        empty_result["yolo_event_times"] = yolo_event_times
         if progress_callback is not None:
             progress_callback("Audio-Analyse", 0.0)
         rms, times = compute_rms(video_path)
@@ -955,8 +986,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
         if not points:
             print("Keine Trigger-Punkte gefunden.")
-            sys.stdout = original_stdout
-            return result
+            return empty_result
 
         # --- Phase B: Clustering ---
         clusters = cluster_points(points, cfg)
@@ -966,8 +996,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
         if not windows:
             print("Keine Fenster nach Filterung uebrig.")
-            sys.stdout = original_stdout
-            return result
+            return empty_result
 
         # --- Phase D: Merge ---
         merged_windows = merge_windows(windows, cfg.merge_gap_sec)
@@ -995,12 +1024,12 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
             if not merged_windows:
                 print("Nach Wertigkeits-Scoring keine Fenster mehr uebrig.")
-                sys.stdout = original_stdout
-                return result
+                return empty_result
 
         # --- Stufe 2: interne Luecken pro Fenster entfernen ---
         all_segments = []
         segment_origin = []
+        segment_scores = []
 
         for w_idx, w in enumerate(merged_windows, start=1):
             clip = (w["start"], w["end"])
@@ -1010,7 +1039,14 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
                              f"Start-Trigger: {w['start_reason']} | "
                              f"End-Berechnung: {w['end_reason']}")
 
+            score_info = None
             if "worthiness_score" in w:
+                score_info = {
+                    "worthiness_score": w["worthiness_score"],
+                    "humor_score": w["humor_score"],
+                    "interest_score": w["interest_score"],
+                    "reason": w["score_reason"],
+                }
                 phase_reason += (f" | LLM-Score: {w['worthiness_score']:.0f} "
                                   f"(Humor {w['humor_score']:.0f}, Interesse {w['interest_score']:.0f}) - "
                                   f"{w['score_reason']}")
@@ -1023,6 +1059,7 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
                 else:
                     origin = f"Fenster #{w_idx} ({fmt_time(clip[0])}-{fmt_time(clip[1])}) || {phase_reason}"
                 segment_origin.append(origin)
+                segment_scores.append(score_info)
 
         print(f"\n[Stufe 2] Insgesamt {len(all_segments)} Segmente nach Luecken-Entfernung "
               f"(vorher {len(merged_windows)} Fenster).")
@@ -1032,32 +1069,30 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
         all_segments = apply_micro_trim_to_segments(all_segments, rms, times, cfg)
 
         combined = [
-            (s, e, origin, pre_s, pre_e)
-            for (s, e), origin, (pre_s, pre_e) in zip(all_segments, segment_origin, pre_trim_segments)
+            (s, e, origin, pre_s, pre_e, score_info)
+            for (s, e), origin, (pre_s, pre_e), score_info in zip(all_segments, segment_origin, pre_trim_segments, segment_scores)
             if e > s
         ]
         combined.sort(key=lambda x: x[0])
 
-        all_segments = [(s, e) for s, e, _, _, _ in combined]
+        all_segments = [(s, e) for s, e, _, _, _, _ in combined]
 
         print(f"\nFinale Segmente ({len(all_segments)}):")
         total = 0
         clip_nr = 0
-        for s, e, origin, _, _ in combined:
+        for s, e, origin, _, _, _ in combined:
             clip_nr += 1
             print(f"  #{clip_nr:03d}  {fmt_time(s)} -> {fmt_time(e)}  ({e-s:.1f}s)  [{origin}]")
             total += e - s
             timeline_rows.append((clip_nr, s, e, e - s))
         print(f"Gesamt-Highlight-Laenge: {fmt_time(total)}\n")
 
-        cut_and_concat(video_path, all_segments, output_path, cfg, progress_callback, cancel_event)
-
         # --- Finale Timeline berechnen (Zeitstempel IM Output-Video) ---
         cumulative = 0.0
 
         intro_metadata = []
 
-        for clip_nr, (s, e, origin, pre_s, pre_e) in enumerate(combined, start=1):
+        for clip_nr, (s, e, origin, pre_s, pre_e, score_info) in enumerate(combined, start=1):
             seg_duration = e - s
 
             final_start = cumulative
@@ -1104,16 +1139,11 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
 
             llm_worthiness_score = llm_humor_score = llm_interest_score = None
             llm_score_reason = None
-            try:
-                if "LLM-Score:" in origin:
-                    llm_part = origin.split("LLM-Score:")[1]
-                    llm_worthiness_score = float(llm_part.split("(")[0].strip())
-                    llm_humor_score = float(llm_part.split("Humor")[1].split(",")[0].strip())
-                    llm_interest_score = float(llm_part.split("Interesse")[1].split(")")[0].strip())
-                    if ") - " in llm_part:
-                        llm_score_reason = llm_part.split(") - ", 1)[1].strip()
-            except Exception:
-                pass
+            if score_info is not None:
+                llm_worthiness_score = score_info["worthiness_score"]
+                llm_humor_score = score_info["humor_score"]
+                llm_interest_score = score_info["interest_score"]
+                llm_score_reason = score_info["reason"]
 
             yolo_count = point_types.count("yolo")
             audio_count = point_types.count("audio")
@@ -1158,14 +1188,26 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
             )
 
             cumulative = final_end
-            result["intro_metadata"] = intro_metadata
+
+        return {
+            "yolo_event_times": yolo_event_times,
+            "all_segments": all_segments,
+            "intro_metadata": intro_metadata,
+            "timeline_rows": timeline_rows,
+            "final_timeline_rows": final_timeline_rows,
+            "log_text": log_buffer.getvalue(),
+        }
     finally:
         if not gui_already_capturing:
             sys.stdout = original_stdout
 
+
+def _write_report_files(output_path: str, log_text: str, timeline_rows: list, final_timeline_rows: list,
+                         intro_metadata: list) -> None:
+    """Schreibt _log.txt / _timeline.txt / _final_timeline.txt / _metadata.json neben output_path."""
     log_path = output_path.rsplit(".", 1)[0] + "_log.txt"
     with open(log_path, "w", encoding="utf-8") as f:
-        f.write(log_buffer.getvalue())
+        f.write(log_text)
     print(f"[Log] Gespeichert: {log_path}")
 
     table_path = output_path.rsplit(".", 1)[0] + "_timeline.txt"
@@ -1194,18 +1236,128 @@ def process_video(video_path: str, output_path: str, cfg: Config, progress_callb
                     f.write(f"    - {sp.strip()}\n")
             f.write("\n")
     print(f"[Log] Finale Output-Timeline gespeichert: {final_table_path}")
+
     json_path = output_path.rsplit(".", 1)[0] + "_metadata.json"
-
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(
-            intro_metadata,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
-
+        json.dump(intro_metadata, f, indent=2, ensure_ascii=False)
     print(f"[Log] Intro-Metadaten gespeichert: {json_path}")
+
+
+def process_video(video_path: str, output_path: str, cfg: Config, progress_callback=None, cancel_event=None,
+                   game_name: str | None = None, game_context: dict | None = None) -> dict:
+    """
+    progress_callback(phase: str, percent: float) wird optional bei
+    den wichtigsten Phasen aufgerufen:
+      "YOLO-Analyse"   (0-100, pro Frame)
+      "Audio-Analyse"  (0/100, da nicht granular messbar)
+      "Transkription"  (0-100, nur wenn enable_speech_to_text aktiv)
+      "Schneiden"      (0-80, pro Segment)
+      "Zusammenfuegen" (85/100)
+
+    game_name/game_context: optional - Spielname + Klassen-Glossar fuer das
+    LLM-Scoring (cfg.scoring_mode == "llm"). Ohne diese Angaben bewertet das
+    LLM ohne Spiel-Kontext.
+    """
+    analysis = _analyze_segments(video_path, cfg, progress_callback, cancel_event, game_name, game_context)
+
+    result = {
+        "yolo_event_times": analysis["yolo_event_times"],
+        "intro_metadata": analysis["intro_metadata"],
+        "output_path": output_path,
+    }
+
+    if not analysis["all_segments"]:
+        return result
+
+    cut_and_concat(video_path, analysis["all_segments"], output_path, cfg, progress_callback, cancel_event)
+
+    _write_report_files(output_path, analysis["log_text"], analysis["timeline_rows"],
+                         analysis["final_timeline_rows"], analysis["intro_metadata"])
+
     return result
+
+
+def export_fcpxml_timeline(
+    video_path: str,
+    output_path: str,
+    cfg: Config,
+    progress_callback=None,
+    cancel_event=None,
+    game_name: str | None = None,
+    game_context: dict | None = None,
+    top_marker_count: int = 5,
+) -> dict:
+    """
+    Erstellt eine FCPXML-Timeline (DaVinci Resolve importierbar) aus denselben
+    Kandidaten-Segmenten wie process_video() - OHNE das Video zu schneiden
+    oder zu rendern. Jeder Clip verweist per In-/Out-Punkt auf das
+    Originalvideo. Die Top-N Clips (nach LLM-Wertigkeitsscore, sonst nach dem
+    Heuristik-Score) bekommen einen roten Marker in der Clip-Mitte.
+    """
+    analysis = _analyze_segments(video_path, cfg, progress_callback, cancel_event, game_name, game_context)
+
+    result = {
+        "yolo_event_times": analysis["yolo_event_times"],
+        "intro_metadata": analysis["intro_metadata"],
+        "output_path": output_path,
+        "clip_count": 0,
+        "top_clip_indices": [],
+    }
+
+    if not analysis["all_segments"]:
+        return result
+
+    intro_metadata = analysis["intro_metadata"]
+
+    def _rank_value(meta: dict) -> float:
+        if meta.get("llm_worthiness_score") is not None:
+            return meta["llm_worthiness_score"]
+        return meta["score"]
+
+    ranked_indices = sorted(range(len(intro_metadata)), key=lambda i: _rank_value(intro_metadata[i]), reverse=True)
+    top_indices = set(ranked_indices[:max(0, top_marker_count)])
+
+    clips = []
+    for i, (s, e) in enumerate(analysis["all_segments"]):
+        meta = intro_metadata[i]
+        clips.append({
+            "start": s,
+            "end": e,
+            "label": f"Clip {i + 1:03d}",
+            "marker_label": f"Top Highlight (Score {_rank_value(meta):.0f})",
+        })
+
+    fps_num, fps_den = get_video_fps(video_path)
+    width, height = get_video_resolution(video_path)
+    source_duration = get_video_duration(video_path)
+
+    xml_text = build_fcpxml(
+        video_path=video_path,
+        clips=clips,
+        fps_num=fps_num,
+        fps_den=fps_den,
+        width=width,
+        height=height,
+        source_duration_sec=source_duration,
+        project_name=Path(output_path).stem,
+        top_marker_indices=top_indices,
+    )
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(xml_text)
+
+    print(f"[FCPXML] Timeline gespeichert: {output_path} ({len(clips)} Clips, "
+          f"{len(top_indices)} Top-Marker)")
+
+    _write_report_files(output_path, analysis["log_text"], analysis["timeline_rows"],
+                         analysis["final_timeline_rows"], intro_metadata)
+
+    result["clip_count"] = len(clips)
+    result["top_clip_indices"] = sorted(top_indices)
+    return result
+
+
 # ----------------------------------------------------------------------
 # Aufruf
 # ----------------------------------------------------------------------

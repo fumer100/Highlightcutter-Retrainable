@@ -29,7 +29,7 @@ root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if root_path not in sys.path:
     sys.path.insert(0, root_path)
 
-from app.cutter.highlight_cutter_pointbased import Config, process_video
+from app.cutter.highlight_cutter_pointbased import Config, process_video, export_fcpxml_timeline
 from app.core.pipeline_controller import PipelineController
 from app.dataset.dataset_manager import DatasetManager
 from app.training.trainer import Trainer
@@ -82,7 +82,7 @@ SETTINGS_SCHEMA = [
     ("llm_provider", "LLM-Anbieter", "choice", "ollama = komplett lokal (empfohlen, kein API-Key), openai = Cloud (braucht OPENAI_API_KEY)"),
     ("llm_model", "LLM-Modell", "text", "Bei Ollama z.B. 'llama3.1:8b' (muss vorher per 'ollama pull' geladen sein), bei OpenAI z.B. 'gpt-4o-mini'"),
     ("ollama_base_url", "Ollama-Server-URL", "text", "Nur relevant bei llm_provider=ollama, Standard: http://localhost:11434/v1"),
-    ("llm_batch_size", "LLM: Fenster pro Anfrage", "int", "Wie viele Kandidaten-Fenster pro LLM-Aufruf gebuendelt werden"),
+    ("llm_batch_size", "LLM: Fenster pro Anfrage", "int", "Wie viele Kandidaten-Fenster pro LLM-Aufruf gebuendelt werden (kleiner = zuverlaessiger bei lokalen Modellen)"),
     ("enable_speech_to_text", "Speech-to-Text aktiv", "bool", "Audiospur transkribieren, damit das LLM Humor/Kommentare mitbewerten kann"),
     ("whisper_model_size", "Whisper-Modellgroesse", "choice", "Groesser = genauer aber langsamer (tiny/base/small/medium/large-v3)"),
     ("whisper_language", "Whisper-Sprache (leer = Auto)", "text", "Sprachcode wie 'de' oder 'en', leer lassen fuer automatische Erkennung"),
@@ -465,6 +465,61 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
+    def export_fcpxml(self, video_paths: list):
+        if not video_paths:
+            return {"ok": False, "error": "Keine Videos ausgewaehlt."}
+        if self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+        self.cancel_event = threading.Event()
+        threading.Thread(target=self._fcpxml_worker, args=(list(video_paths), self.cancel_event), daemon=True).start()
+        return {"ok": True}
+
+    def _fcpxml_worker(self, video_paths, cancel_event):
+        real_stdout = sys.stdout
+        sys.stdout = _LogStream(self)
+        self._push("busy", True)
+        try:
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            self._sync_model_path()
+            total = len(video_paths)
+            total_clips = 0
+            total_top = 0
+
+            for idx, video in enumerate(video_paths, start=1):
+                if cancel_event.is_set():
+                    raise RuntimeError("Vorgang abgebrochen.")
+
+                self._push("status", f"FCPXML-Export: {os.path.basename(video)}")
+                base = os.path.splitext(os.path.basename(video))[0]
+                output_path = os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml")
+
+                result = export_fcpxml_timeline(
+                    video_path=video,
+                    output_path=output_path,
+                    cfg=self.cfg,
+                    progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
+                    cancel_event=cancel_event,
+                    game_name=self.current_game,
+                    game_context=self._dm().game.llm_context,
+                )
+                total_clips += result["clip_count"]
+                total_top += len(result["top_clip_indices"])
+                self._push("overallProgress", {"idx": idx, "total": total})
+
+            self._push("status", "FCPXML-Export fertig")
+            self._push("done", {
+                "message": (
+                    f"{total_clips} Clips in {total} Timeline(s) exportiert "
+                    f"({total_top} Top-Marker gesetzt). Es wurde KEIN Video geschnitten."
+                ),
+            })
+        except Exception as e:
+            self._push("cancelled" if cancel_event.is_set() else "error", str(e))
+        finally:
+            sys.stdout = real_stdout
+            self.cancel_event = None
+            self._push("busy", False)
+
     def cancel_current_operation(self):
         if self.cancel_event is None:
             return {"ok": False, "error": "Kein Vorgang laeuft."}
@@ -630,6 +685,11 @@ def api_start_processing():
 @app.route("/api/run_ml_pipeline", methods=["POST"])
 def api_run_ml_pipeline():
     return jsonify(core.run_ml_pipeline(request.get_json(force=True).get("videos", [])))
+
+
+@app.route("/api/export_fcpxml", methods=["POST"])
+def api_export_fcpxml():
+    return jsonify(core.export_fcpxml(request.get_json(force=True).get("videos", [])))
 
 
 @app.route("/api/run_training", methods=["POST"])

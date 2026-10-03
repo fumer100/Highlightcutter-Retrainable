@@ -103,34 +103,64 @@ def _call_llm(client, model: str, payloads: list[dict]) -> list[dict]:
     data = _extract_json(response.choices[0].message.content)
     raw_results = data.get("results", [])
 
-    by_index = {}
+    def _parse_entry(entry: dict) -> dict:
+        return {
+            "score": float(entry.get("score", _FALLBACK_SCORE)),
+            "humor_score": float(entry.get("humor_score", 0.0)),
+            "interest_score": float(entry.get("interest_score", 0.0)),
+            "reason": str(entry.get("reason", "")).strip() or "(keine Begruendung)",
+        }
+
+    # Lokale Modelle (z.B. llama3.1:8b) halten das "index"-Feld bei groesseren
+    # Batches nicht immer zuverlaessig ein (fehlt, doppelt, falsch gezaehlt).
+    # Deshalb: erst per Index zuordnen, alles andere danach der Reihe nach
+    # (Antwort-Reihenfolge) auf die verbleibenden Luecken verteilen, statt
+    # bei jedem kaputten Index sofort in den Fallback zu fallen.
+    by_index: dict[int, dict] = {}
+    unindexed: list[dict] = []
+
     for entry in raw_results:
+        if not isinstance(entry, dict):
+            continue
         try:
-            idx = int(entry["index"])
-            by_index[idx] = {
-                "score": float(entry.get("score", _FALLBACK_SCORE)),
-                "humor_score": float(entry.get("humor_score", 0.0)),
-                "interest_score": float(entry.get("interest_score", 0.0)),
-                "reason": str(entry.get("reason", "")).strip() or "(keine Begruendung)",
-            }
-        except (KeyError, TypeError, ValueError):
+            parsed = _parse_entry(entry)
+        except (TypeError, ValueError):
             continue
 
+        idx = entry.get("index")
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            idx = None
+
+        if idx is not None and 0 <= idx < len(payloads) and idx not in by_index:
+            by_index[idx] = parsed
+        else:
+            unindexed.append(parsed)
+
+    unindexed_iter = iter(unindexed)
     results = []
     for i in range(len(payloads)):
-        results.append(by_index.get(i, {
-            "score": _FALLBACK_SCORE,
-            "humor_score": 0.0,
-            "interest_score": 0.0,
-            "reason": "LLM-Antwort fuer dieses Fenster fehlte/ungueltig - Fallback.",
-        }))
+        if i in by_index:
+            results.append(by_index[i])
+            continue
+        fallback_entry = next(unindexed_iter, None)
+        if fallback_entry is not None:
+            results.append(fallback_entry)
+        else:
+            results.append({
+                "score": _FALLBACK_SCORE,
+                "humor_score": 0.0,
+                "interest_score": 0.0,
+                "reason": "LLM-Antwort fuer dieses Fenster fehlte/ungueltig - Fallback.",
+            })
     return results
 
 
 def score_windows(
     payloads: list[dict],
     llm_model: str,
-    batch_size: int = 25,
+    batch_size: int = 10,
     provider: str = "ollama",
     ollama_base_url: str = _DEFAULT_OLLAMA_URL,
 ) -> list[dict]:

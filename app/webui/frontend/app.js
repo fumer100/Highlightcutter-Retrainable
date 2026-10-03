@@ -187,6 +187,13 @@ function bindEvents() {
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   });
 
+  document.getElementById("exportFcpxmlBtn").addEventListener("click", async () => {
+    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+    setBusy(true);
+    const res = await apiPost("/api/export_fcpxml", { videos: state.videos });
+    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  });
+
   document.getElementById("trainBtn").addEventListener("click", async () => {
     setBusy(true);
     const res = await apiPost("/api/run_training");
@@ -419,7 +426,7 @@ function onReviewCount(count) {
 
 function setBusy(busy) {
   document.getElementById("busyOverlay").classList.toggle("hidden", !busy);
-  ["startBtn", "mlPipelineBtn", "trainBtn"].forEach((id) => {
+  ["startBtn", "mlPipelineBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
     document.getElementById(id).disabled = busy;
   });
   document.getElementById("cancelBtn").disabled = !busy;
