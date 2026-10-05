@@ -36,6 +36,7 @@ def build_fcpxml(
     source_duration_sec: float,
     project_name: str,
     top_marker_indices: set,
+    audio_channels_per_stream: list[int] | None = None,
 ) -> str:
     """
     clips: Liste von {"start": float, "end": float, "label": str,
@@ -44,6 +45,12 @@ def build_fcpxml(
 
     top_marker_indices: Indizes in 'clips', die einen roten Marker in der
     Clip-Mitte bekommen sollen.
+
+    audio_channels_per_stream: Kanalzahl JE Audiospur der Quelldatei, in
+    Stream-Reihenfolge (z.B. [2, 1, 1, 1, 1, 1] fuer 1 Stereo-Mix + 5 Mono-
+    Spuren). Jede Spur bekommt eine eigene Lane, damit sie in Resolve als
+    eigene, einzeln bearbeitbare Audiospur ankommt. None/leer = 1 Stereo-
+    Spur (altes Verhalten).
     """
     fps = Fraction(fps_num, fps_den)
 
@@ -55,6 +62,22 @@ def build_fcpxml(
     total_duration = sum(c["end"] - c["start"] for c in clips)
     seq_duration = _rational_time(total_duration, fps)
 
+    audio_channels_per_stream = audio_channels_per_stream or [2]
+    total_audio_channels = sum(audio_channels_per_stream) or 2
+    audio_source_count = len(audio_channels_per_stream)
+
+    # Kanal-Bereiche je Spur vorab berechnen (1-basiert, ueber alle Spuren hinweg).
+    audio_lanes = []
+    channel_cursor = 1
+    for stream_idx, ch_count in enumerate(audio_channels_per_stream):
+        channel_range = list(range(channel_cursor, channel_cursor + ch_count))
+        channel_cursor += ch_count
+        audio_lanes.append({
+            "src_ch": ", ".join(str(c) for c in channel_range),
+            "lane": 0 if stream_idx == 0 else -stream_idx,
+            "role": f"track-{stream_idx + 1}",
+        })
+
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         "<!DOCTYPE fcpxml>",
@@ -64,7 +87,8 @@ def build_fcpxml(
         f'width="{width}" height="{height}"/>',
         f'    <asset id="r2" name="{escape(Path(video_path).name)}" '
         f'src="{escape(asset_uri)}" start="0s" duration="{asset_duration}" '
-        f'hasVideo="1" hasAudio="1" format="r1" audioSources="1" audioChannels="2"/>',
+        f'hasVideo="1" hasAudio="1" format="r1" '
+        f'audioSources="{audio_source_count}" audioChannels="{total_audio_channels}"/>',
         "  </resources>",
         "  <library>",
         '    <event name="Highlight Cutter Export">',
@@ -83,24 +107,30 @@ def build_fcpxml(
         clip_dur = _rational_time(clip_duration, fps)
         name = escape(clip.get("label", f"Clip {idx + 1}"))
 
+        lines.append(
+            f'            <asset-clip ref="r2" name="{name}" offset="{offset}" '
+            f'start="{start}" duration="{clip_dur}">'
+        )
+
+        # Jede Original-Audiospur als eigene Lane referenzieren, damit sie in
+        # Resolve als eigene, einzeln bearbeitbare Audiospur landet.
+        for lane_info in audio_lanes:
+            lane_attr = "" if lane_info["lane"] == 0 else f' lane="{lane_info["lane"]}"'
+            lines.append(
+                f'              <audio-channel-source srcCh="{lane_info["src_ch"]}" '
+                f'role="{lane_info["role"]}"{lane_attr}/>'
+            )
+
         if idx in top_marker_indices:
             marker_time_sec = clip_start + clip_duration / 2
             marker_start = _rational_time(marker_time_sec, fps)
             marker_label = escape(clip.get("marker_label", "Top Highlight"))
             lines.append(
-                f'            <asset-clip ref="r2" name="{name}" offset="{offset}" '
-                f'start="{start}" duration="{clip_dur}">'
-            )
-            lines.append(
                 f'              <marker start="{marker_start}" duration="{frame_duration}" '
                 f'value="{marker_label}" completed="0"/>'
             )
-            lines.append("            </asset-clip>")
-        else:
-            lines.append(
-                f'            <asset-clip ref="r2" name="{name}" offset="{offset}" '
-                f'start="{start}" duration="{clip_dur}"/>'
-            )
+
+        lines.append("            </asset-clip>")
 
         offset_sec += clip_duration
 

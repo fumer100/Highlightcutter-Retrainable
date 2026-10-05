@@ -757,6 +757,21 @@ def get_video_resolution(video_path: str) -> tuple[int, int]:
     width_str, height_str = result.stdout.strip().split("x")
     return int(width_str), int(height_str)
 
+
+def get_audio_stream_channels(video_path: str) -> list[int]:
+    """Kanalzahl JE Audiospur, in Stream-Reihenfolge (z.B. [2, 1, 1, 1, 1, 1]
+    fuer OBS-Aufnahmen mit mehreren separaten Mono-/Stereo-Audiospuren)."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=channels",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return [int(line) for line in lines] if lines else [2]
+
 import subprocess
 import json
 
@@ -1330,6 +1345,9 @@ def export_fcpxml_timeline(
     fps_num, fps_den = get_video_fps(video_path)
     width, height = get_video_resolution(video_path)
     source_duration = get_video_duration(video_path)
+    audio_channels_per_stream = get_audio_stream_channels(video_path)
+    print(f"[FCPXML] Erkannte Audiospuren: {len(audio_channels_per_stream)} "
+          f"(Kanaele je Spur: {audio_channels_per_stream})")
 
     xml_text = build_fcpxml(
         video_path=video_path,
@@ -1341,6 +1359,7 @@ def export_fcpxml_timeline(
         source_duration_sec=source_duration,
         project_name=Path(output_path).stem,
         top_marker_indices=top_indices,
+        audio_channels_per_stream=audio_channels_per_stream,
     )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
