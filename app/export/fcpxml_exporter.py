@@ -48,9 +48,11 @@ def build_fcpxml(
 
     audio_channels_per_stream: Kanalzahl JE Audiospur der Quelldatei, in
     Stream-Reihenfolge (z.B. [2, 1, 1, 1, 1, 1] fuer 1 Stereo-Mix + 5 Mono-
-    Spuren). Jede Spur bekommt eine eigene Lane, damit sie in Resolve als
-    eigene, einzeln bearbeitbare Audiospur ankommt. None/leer = 1 Stereo-
-    Spur (altes Verhalten).
+    Spuren). JEDER EINZELNE Kanal bekommt eine eigene Lane/Spur (nicht pro
+    Stream gebuendelt) - Resolve hat sich als unzuverlaessig erwiesen, wenn
+    mehrere Kanaele in einem einzigen audio-channel-source (srcCh="1, 2")
+    zusammengefasst werden (Kanaele landeten getrennt/falsch zugeordnet statt
+    als Stereopaar). None/leer = 1 Stereo-Spur, 2 Lanes (altes Verhalten).
     """
     fps = Fraction(fps_num, fps_den)
 
@@ -66,17 +68,25 @@ def build_fcpxml(
     total_audio_channels = sum(audio_channels_per_stream) or 2
     audio_source_count = len(audio_channels_per_stream)
 
-    # Kanal-Bereiche je Spur vorab berechnen (1-basiert, ueber alle Spuren hinweg).
+    # Jeder einzelne Roh-Kanal bekommt seine eigene Lane (1 Kanal = 1 Spur in
+    # Resolve), statt mehrere Kanaele eines Streams in einem srcCh-Listenwert
+    # zu buendeln.
     audio_lanes = []
-    channel_cursor = 1
+    channel_number = 1
+    lane_counter = 0
     for stream_idx, ch_count in enumerate(audio_channels_per_stream):
-        channel_range = list(range(channel_cursor, channel_cursor + ch_count))
-        channel_cursor += ch_count
-        audio_lanes.append({
-            "src_ch": ", ".join(str(c) for c in channel_range),
-            "lane": 0 if stream_idx == 0 else -stream_idx,
-            "role": f"track-{stream_idx + 1}",
-        })
+        for ch_in_stream in range(ch_count):
+            role = (
+                f"track-{stream_idx + 1}" if ch_count == 1
+                else f"track-{stream_idx + 1}-ch{ch_in_stream + 1}"
+            )
+            audio_lanes.append({
+                "src_ch": str(channel_number),
+                "lane": 0 if lane_counter == 0 else -lane_counter,
+                "role": role,
+            })
+            channel_number += 1
+            lane_counter += 1
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
