@@ -31,7 +31,9 @@ if root_path not in sys.path:
 
 from app.cutter.highlight_cutter_pointbased import Config, process_video, export_fcpxml_timeline
 from app.core.pipeline_controller import PipelineController
+from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
 from app.dataset.dataset_manager import DatasetManager
+from app.extractor.frame_extractor import FrameExtractor
 from app.training.trainer import Trainer
 from config.games import (
     GAMES,
@@ -178,10 +180,25 @@ class Core:
     def _push(self, event: str, data=None):
         self.event_queue.put({"event": event, "data": data})
 
+    def _dm_for(self, game_name: str) -> DatasetManager:
+        if game_name not in self._dataset_managers:
+            self._dataset_managers[game_name] = DatasetManager(game_name)
+        return self._dataset_managers[game_name]
+
     def _dm(self) -> DatasetManager:
-        if self.current_game not in self._dataset_managers:
-            self._dataset_managers[self.current_game] = DatasetManager(self.current_game)
-        return self._dataset_managers[self.current_game]
+        return self._dm_for(self.current_game)
+
+    def _require_model(self):
+        """Gibt eine Fehlermeldung zurueck, solange das aktuelle Spiel noch kein Modell hat."""
+        if not self._dm().game.model_path.is_file():
+            return {
+                "ok": False,
+                "error": (
+                    f"'{self.current_game}' hat noch kein Modell. Bitte zuerst die Frames in der Review Queue "
+                    "labeln und das erste Modell trainieren (Button 'Erstes Modell trainieren')."
+                ),
+            }
+        return None
 
     def _pc(self) -> PipelineController:
         if self.current_game not in self._pipeline_controllers:
@@ -207,17 +224,23 @@ class Core:
 
     def get_state(self):
         classes, model_path, review_count = [], "", 0
+        has_model, dataset_stats = True, {}
         if self.current_game:
             dm = self._dm()
             classes = dm.game.classes
             model_path = str(dm.game.model_path)
             review_count = self._review_count()
+            has_model = dm.game.model_path.is_file()
+            dataset_stats = dm.labeled_stats()
 
         return {
             "games": list(GAMES.keys()),
             "currentGame": self.current_game,
             "classes": classes,
             "modelPath": model_path,
+            "hasModel": has_model,
+            "datasetStats": dataset_stats,
+            "firstModelMinLabeled": FIRST_MODEL_MIN_LABELED,
             "reviewCount": review_count,
             "settingsSchema": [
                 {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
@@ -341,25 +364,42 @@ class Core:
     # Neues Spiel anlegen
     # ------------------------------------------------------------
 
-    def add_game(self, name: str, model_source_path: str, classes: list):
+    def add_game(self, name: str, model_source_path: str, classes: list, video_paths: list | None = None):
+        """
+        Legt ein Spiel an. Pflicht: ENTWEDER ein vorhandenes YOLO-Modell (.pt) ODER
+        mindestens ein Video. Bei Video werden ca. 100 Frames in die Review Queue
+        gelegt, die der Nutzer labelt; damit wird anschliessend das erste Modell trainiert.
+        """
         name = (name or "").strip()
         classes = [c.strip() for c in (classes or []) if c and c.strip()]
+        model_source_path = (model_source_path or "").strip()
+        video_paths = [v for v in (video_paths or []) if v]
 
         if not name:
             return {"ok": False, "error": "Bitte einen Spielnamen eingeben."}
         if name in GAMES:
             return {"ok": False, "error": f"Ein Spiel namens '{name}' existiert bereits."}
-        if not model_source_path or not Path(model_source_path).is_file():
+        if model_source_path and video_paths:
+            return {"ok": False, "error": "Bitte nur EINE Quelle waehlen: entweder ein Modell (.pt) oder Video(s)."}
+        if not model_source_path and not video_paths:
+            return {"ok": False, "error": "Bitte ein YOLO-Modell (.pt) ODER ein Video zum Spiel auswaehlen."}
+        if model_source_path and not Path(model_source_path).is_file():
             return {"ok": False, "error": "Bitte ein gueltiges YOLO-Modell (.pt) auswaehlen."}
+        missing = [v for v in video_paths if not Path(v).is_file()]
+        if missing:
+            return {"ok": False, "error": f"Video nicht gefunden: {missing[0]}"}
         if not classes:
             return {"ok": False, "error": "Bitte mindestens eine Klasse angeben."}
         if len(classes) != len(set(classes)):
             return {"ok": False, "error": "Doppelte Klassennamen gefunden."}
+        if video_paths and self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
 
         try:
             model_dst = PROJECT_ROOT / "models" / name / "current.pt"
             model_dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(model_source_path, model_dst)
+            if model_source_path:
+                shutil.copy2(model_source_path, model_dst)
 
             with open(GAMES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -380,7 +420,43 @@ class Core:
             return {"ok": False, "error": str(e)}
 
         self.current_game = name
-        return {"ok": True, "state": self.get_state()}
+        if video_paths:
+            self.cancel_event = threading.Event()
+            threading.Thread(
+                target=self._bootstrap_worker, args=(name, video_paths, self.cancel_event), daemon=True
+            ).start()
+        return {"ok": True, "state": self.get_state(), "bootstrap": bool(video_paths)}
+
+    def _bootstrap_worker(self, game_name, video_paths, cancel_event):
+        real_stdout = sys.stdout
+        sys.stdout = _LogStream(self)
+        self._push("busy", True)
+        try:
+            dm = self._dm_for(game_name)
+            self._push("status", f"Erstelle Start-Frames fuer '{game_name}' ...")
+            stats = extract_bootstrap_frames(
+                FrameExtractor(dm),
+                video_paths,
+                target=BOOTSTRAP_FRAME_TARGET,
+                duplicate_threshold=self.cfg.ml_duplicate_threshold,
+                progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
+                cancel_event=cancel_event,
+            )
+            self._push("reviewCount", self._review_count())
+            self._push("stateChanged")
+            self._push("status", "Start-Frames fertig")
+            self._push("done", {
+                "message": (
+                    f"{stats['extracted']} Frames liegen in der Review Queue von '{game_name}'. "
+                    f"Als Naechstes: Frames labeln, dann das erste Modell trainieren."
+                ),
+            })
+        except Exception as e:
+            self._push("cancelled" if cancel_event.is_set() else "error", str(e))
+        finally:
+            sys.stdout = real_stdout
+            self.cancel_event = None
+            self._push("busy", False)
 
     # ------------------------------------------------------------
     # Verarbeitung (Hintergrund-Threads, Fortschritt/Log via SSE-Queue)
@@ -389,6 +465,8 @@ class Core:
     def start_processing(self, video_paths: list):
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
+        if (err := self._require_model()):
+            return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
         self.cancel_event = threading.Event()
@@ -436,6 +514,8 @@ class Core:
         """export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden."""
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
+        if (err := self._require_model()):
+            return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
         self.cancel_event = threading.Event()
@@ -524,21 +604,56 @@ class Core:
     def run_training(self):
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+
+        dm = self._dm()
+        first_model = not dm.game.model_path.is_file()
+        if first_model:
+            stats = dm.labeled_stats()
+            if stats["with_boxes"] < FIRST_MODEL_MIN_LABELED or stats["val"] < 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Fuer das erste Modell werden mindestens {FIRST_MODEL_MIN_LABELED} gelabelte Bilder "
+                        f"mit Boxen benoetigt (aktuell {stats['with_boxes']}, davon {stats['val']} in val). "
+                        "Bitte in der Review Queue weitere Bilder labeln und mit 'Accept' bestaetigen."
+                    ),
+                }
+
         self.cancel_event = threading.Event()
-        threading.Thread(target=self._train_worker, args=(self.cancel_event,), daemon=True).start()
+        threading.Thread(target=self._train_worker, args=(self.cancel_event, first_model), daemon=True).start()
         return {"ok": True}
 
-    def _train_worker(self, cancel_event):
+    def _train_worker(self, cancel_event, first_model=False):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
         try:
             dm = self._dm()
-            trainer = Trainer(dm, model_path=str(dm.game.model_path))
-            self._push("status", "Training laeuft...")
-            trainer.train(epochs=30, img_size=640, cancel_event=cancel_event)
+            game_name = self.current_game
+            base_weights = PROJECT_ROOT / "yolo26n.pt"
+            trainer = Trainer(
+                dm,
+                model_path=str(dm.game.model_path),
+                base_weights=str(base_weights) if base_weights.is_file() else "yolo26n.pt",
+            )
+            self._push("status", "Erstes Modell wird trainiert..." if first_model else "Training laeuft...")
+            trainer.train(epochs=60 if first_model else 30, img_size=640, cancel_event=cancel_event)
             self._push("status", "Training fertig")
-            self._push("done", {"message": "Retraining abgeschlossen."})
+
+            # Gecachte Pipeline nutzt sonst weiter das alte (bzw. kein) Modell
+            self._pipeline_controllers.pop(game_name, None)
+            self._push("stateChanged")
+
+            if first_model:
+                model_path = str(dm.game.model_path)
+                self._push("firstModelReady", {
+                    "game": game_name,
+                    "modelPath": model_path,
+                    "versionsDir": str(trainer.version_dir),
+                })
+                self._push("done", {"message": f"Erstes Modell fuer '{game_name}' gespeichert: {model_path}"})
+            else:
+                self._push("done", {"message": "Retraining abgeschlossen."})
         except Exception as e:
             self._push("cancelled" if cancel_event.is_set() else "error", str(e))
         finally:
@@ -549,6 +664,8 @@ class Core:
     def export_fcpxml(self, video_paths: list):
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
+        if (err := self._require_model()):
+            return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
         self.cancel_event = threading.Event()
@@ -755,7 +872,9 @@ def api_extract_classes_from_json():
 @app.route("/api/add_game", methods=["POST"])
 def api_add_game():
     data = request.get_json(force=True)
-    return jsonify(core.add_game(data.get("name"), data.get("modelPath"), data.get("classes")))
+    return jsonify(core.add_game(
+        data.get("name"), data.get("modelPath"), data.get("classes"), data.get("videoPaths")
+    ))
 
 
 @app.route("/api/start_processing", methods=["POST"])

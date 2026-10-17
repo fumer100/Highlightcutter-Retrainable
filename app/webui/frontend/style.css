@@ -342,6 +342,12 @@ select {
   white-space: pre-line;
 }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
+.form-row.hidden, .bootstrap-panel.hidden { display: none; }
+.source-options { display: flex; flex-direction: column; gap: 6px; }
+.form-row .radio-row { font-weight: 500; color: var(--text); display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.bootstrap-panel { border-left: 4px solid var(--warning); }
+.bootstrap-steps { margin: 0 0 6px 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+.bootstrap-steps li.done { color: var(--success); }
 
 /* ---------------- Busy overlay ---------------- */
 

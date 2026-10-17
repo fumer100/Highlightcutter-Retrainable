@@ -46,6 +46,15 @@
     </section>
   </div>
 
+  <section class="panel bootstrap-panel hidden" id="bootstrapBanner">
+    <div class="panel-header"><h2>🧭 Erstes Modell für dieses Spiel einrichten</h2></div>
+    <ol class="bootstrap-steps">
+      <li id="bootstrapStep1"></li>
+      <li id="bootstrapStep2"></li>
+    </ol>
+    <div class="report-subtitle">Bis das erste Modell existiert, sind „ML Pipeline + FCPXML“ und „FCPXML-Timeline exportieren“ gesperrt.</div>
+  </section>
+
   <section class="panel actions-panel">
     <div class="panel-header"><h2>Aktionen</h2></div>
     <div class="action-buttons">
@@ -112,11 +121,29 @@
     </div>
 
     <div class="form-row">
+      <label>Quelle für das erste Modell (Pflicht – eine Option wählen)</label>
+      <div class="source-options">
+        <label class="radio-row"><input type="radio" name="gameSource" value="model" checked> Ich habe schon ein YOLO-Modell (.pt)</label>
+        <label class="radio-row"><input type="radio" name="gameSource" value="video"> Ich habe nur Video(s) zum Spiel – Modell selbst trainieren</label>
+      </div>
+    </div>
+
+    <div class="form-row" id="sourceModelRow">
       <label>YOLO-Modell (.pt)</label>
       <div class="input-with-btn">
         <input type="text" id="newGameModelPath" readonly placeholder="current.pt auswählen...">
         <button id="browseModelBtn" class="btn btn-outline">Durchsuchen...</button>
       </div>
+    </div>
+
+    <div class="form-row hidden" id="sourceVideoRow">
+      <label>Video(s) zum Spiel</label>
+      <div class="input-with-btn">
+        <input type="text" id="newGameVideoPaths" readonly placeholder="Video(s) auswählen...">
+        <button id="browseGameVideosBtn" class="btn btn-outline">Durchsuchen...</button>
+      </div>
+      <small>Daraus werden ca. 100 gleichmäßig verteilte Frames in die Review Queue des Spiels gelegt. Du beschriftest sie
+        einmalig, danach wird das erste Modell trainiert (Anleitung erscheint nach dem Anlegen).</small>
     </div>
 
     <div class="form-row">
@@ -133,6 +160,16 @@
     <div class="modal-actions">
       <button id="saveGameBtn" class="btn btn-primary">Speichern</button>
       <button id="cancelGameBtn" class="btn btn-outline">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<div id="firstModelModal" class="modal hidden">
+  <div class="modal-content">
+    <h2>✅ Erstes Modell ist fertig</h2>
+    <div class="form-row info-row" id="firstModelInfo"></div>
+    <div class="modal-actions">
+      <button id="firstModelOkBtn" class="btn btn-primary">Verstanden</button>
     </div>
   </div>
 </div>

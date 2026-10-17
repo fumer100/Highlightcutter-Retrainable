@@ -17,12 +17,16 @@ class Trainer:
     def __init__(
         self,
         dataset_manager: DatasetManager,
-        model_path: str
+        model_path: str,
+        base_weights: str = "yolo26n.pt"
     ):
 
         self.dm = dataset_manager
 
         self.model_path = Path(model_path)
+
+        # Startgewichte fuers ERSTE Modell eines Spiels (current.pt existiert noch nicht)
+        self.base_weights = base_weights
 
         self.version_dir = self.model_path.parent / "versions"
 
@@ -38,7 +42,11 @@ class Trainer:
 
         dataset_yaml = self._create_dataset_yaml()
 
-        model = YOLO(self.model_path)
+        if self.model_path.exists():
+            model = YOLO(self.model_path)
+        else:
+            print(f"[Training] Erstes Modell: starte von {self.base_weights}")
+            model = YOLO(self.base_weights)
 
         def stop_if_cancelled(_trainer):
             if cancel_event is not None and cancel_event.is_set():

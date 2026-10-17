@@ -61,9 +61,48 @@ function applyState(s) {
   state.games = s.games;
   state.currentGame = s.currentGame;
   state.classes = s.classes;
+  state.hasModel = s.hasModel !== false;
+  state.datasetStats = s.datasetStats || {};
+  state.firstModelMinLabeled = s.firstModelMinLabeled || 20;
   renderGameDropdown();
   renderSettings(s.settingsSchema);
   updateReviewBadge(s.reviewCount);
+  renderBootstrapBanner();
+  updateActionButtons();
+}
+
+async function refreshState() {
+  applyState(await apiGet("/api/state"));
+}
+
+function renderBootstrapBanner() {
+  const banner = document.getElementById("bootstrapBanner");
+  const needsModel = state.currentGame && !state.hasModel;
+  banner.classList.toggle("hidden", !needsModel);
+  document.getElementById("trainBtn").textContent =
+    needsModel ? "🧠 Erstes Modell trainieren" : "🧠 Train Model";
+  if (!needsModel) return;
+
+  const st = state.datasetStats;
+  const open = st.review ?? 0;
+  const labeled = st.with_boxes ?? 0;
+  const min = state.firstModelMinLabeled;
+  const step1 = document.getElementById("bootstrapStep1");
+  const step2 = document.getElementById("bootstrapStep2");
+  step1.textContent = `Frames labeln: Review Queue öffnen, Boxen zeichnen und mit „Accept“ bestätigen ` +
+    `(offen: ${open}, bestätigt mit Boxen: ${labeled} / mind. ${min}).`;
+  step1.classList.toggle("done", labeled >= min);
+  step2.textContent = `Erstes Modell trainieren: Button „Erstes Modell trainieren“ (dauert je nach GPU einige Minuten).`;
+}
+
+function updateActionButtons() {
+  const needsModel = state.currentGame && !state.hasModel;
+  const modelButtons = ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn"];
+  modelButtons.forEach((id) => {
+    document.getElementById(id).disabled = state.busy || needsModel;
+  });
+  document.getElementById("trainBtn").disabled = !!state.busy;
+  document.getElementById("cancelBtn").disabled = !state.busy;
 }
 
 // ------------------------------------------------------------
@@ -85,6 +124,8 @@ function connectEvents() {
       case "cancelled": onCancelled(data); break;
       case "reviewCount": onReviewCount(data); break;
       case "mlReport": onMlReport(data); break;
+      case "stateChanged": refreshState(); break;
+      case "firstModelReady": onFirstModelReady(data); break;
     }
   };
   es.onerror = () => {
@@ -121,6 +162,21 @@ function bindEvents() {
     if (res.ok && res.paths.length) document.getElementById("newGameModelPath").value = res.paths[0];
   });
 
+  document.getElementById("browseGameVideosBtn").addEventListener("click", async () => {
+    const res = await apiPost("/api/pick_files", { kind: "video" });
+    if (res.ok && res.paths.length) {
+      state.newGameVideos = res.paths;
+      document.getElementById("newGameVideoPaths").value = res.paths.join("; ");
+    }
+  });
+
+  document.querySelectorAll('input[name="gameSource"]').forEach((r) =>
+    r.addEventListener("change", updateGameSourceRows));
+
+  document.getElementById("firstModelOkBtn").addEventListener("click", () => {
+    document.getElementById("firstModelModal").classList.add("hidden");
+  });
+
   document.getElementById("loadClassesBtn").addEventListener("click", async () => {
     const picked = await apiPost("/api/pick_files", { kind: "json" });
     if (!picked.ok || !picked.paths.length) return;
@@ -133,15 +189,24 @@ function bindEvents() {
 
   document.getElementById("saveGameBtn").addEventListener("click", async () => {
     const name = document.getElementById("newGameName").value.trim();
-    const modelPath = document.getElementById("newGameModelPath").value.trim();
+    const source = document.querySelector('input[name="gameSource"]:checked').value;
+    const modelPath = source === "model" ? document.getElementById("newGameModelPath").value.trim() : "";
+    const videoPaths = source === "video" ? state.newGameVideos : [];
     const classes = document.getElementById("newGameClasses").value
       .split(",").map((c) => c.trim()).filter(Boolean);
 
-    const res = await apiPost("/api/add_game", { name, modelPath, classes });
+    if (source === "model" && !modelPath) { showToast("Bitte ein YOLO-Modell (.pt) auswählen.", "warn"); return; }
+    if (source === "video" && !videoPaths.length) { showToast("Bitte mindestens ein Video auswählen.", "warn"); return; }
+
+    const res = await apiPost("/api/add_game", { name, modelPath, videoPaths, classes });
     if (res.ok) {
       applyState(res.state);
       closeAddGameModal();
-      showToast(`Spiel '${name}' wurde hinzugefügt.`, "success");
+      showToast(
+        res.bootstrap
+          ? `Spiel '${name}' angelegt. Start-Frames werden erzeugt ...`
+          : `Spiel '${name}' wurde hinzugefügt.`,
+        "success");
     } else {
       showToast(res.error, "error");
     }
@@ -274,13 +339,33 @@ function updateReviewBadge(count) {
 function openAddGameModal() {
   document.getElementById("newGameName").value = "";
   document.getElementById("newGameModelPath").value = "";
+  document.getElementById("newGameVideoPaths").value = "";
   document.getElementById("newGameClasses").value = "";
+  state.newGameVideos = [];
+  document.querySelector('input[name="gameSource"][value="model"]').checked = true;
+  updateGameSourceRows();
   updateAddGameInfo();
   document.getElementById("addGameModal").classList.remove("hidden");
 }
 
 function closeAddGameModal() {
   document.getElementById("addGameModal").classList.add("hidden");
+}
+
+function updateGameSourceRows() {
+  const source = document.querySelector('input[name="gameSource"]:checked').value;
+  document.getElementById("sourceModelRow").classList.toggle("hidden", source !== "model");
+  document.getElementById("sourceVideoRow").classList.toggle("hidden", source !== "video");
+}
+
+function onFirstModelReady({ game, modelPath, versionsDir }) {
+  document.getElementById("firstModelInfo").textContent =
+    `Das erste Modell für '${game}' wurde trainiert und gespeichert.\n\n` +
+    `Modell:  ${modelPath}\n` +
+    `Trainingsläufe (Kurven, Metriken, weitere Gewichte):  ${versionsDir}\n\n` +
+    `Ab jetzt läuft alles wie gewohnt: Video auswählen, ML Pipeline + FCPXML starten, ` +
+    `Review Queue labeln und bei Bedarf neu trainieren.`;
+  document.getElementById("firstModelModal").classList.remove("hidden");
 }
 
 function updateAddGameInfo() {
@@ -444,11 +529,9 @@ function onMlReport(report) {
 }
 
 function setBusy(busy) {
+  state.busy = busy;
   document.getElementById("busyOverlay").classList.toggle("hidden", !busy);
-  ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
-    document.getElementById(id).disabled = busy;
-  });
-  document.getElementById("cancelBtn").disabled = !busy;
+  updateActionButtons();
 }
 
 // ------------------------------------------------------------
@@ -480,6 +563,7 @@ function showReviewView() {
 function showMainView() {
   document.getElementById("reviewView").classList.add("hidden");
   document.getElementById("mainView").classList.remove("hidden");
+  refreshState();
 }
 
 // ------------------------------------------------------------

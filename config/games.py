@@ -122,7 +122,12 @@ GAMES = _load_games()
 
 
 def reload_games():
-    """Erlaubt Neuladen der Konfiguration zur Laufzeit, ohne die App neu zu starten."""
-    global GAMES
-    GAMES = _load_games()
+    """
+    Erlaubt Neuladen der Konfiguration zur Laufzeit, ohne die App neu zu starten.
+    Das GAMES-Dict wird IN PLACE aktualisiert, damit alle Module, die es per
+    `from config.games import GAMES` importiert haben, die Aenderung sehen.
+    """
+    new_games = _load_games()
+    GAMES.clear()
+    GAMES.update(new_games)
     return GAMES

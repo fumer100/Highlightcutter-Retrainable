@@ -72,6 +72,21 @@ class DatasetManager:
 
         highest = 0
 
+        # val-Bilder zaehlen mit, sonst koennten nach einem Neustart IDs doppelt vergeben werden
+        for image in self.val_images.glob("*.jpg"):
+
+            try:
+
+                number = int(
+                    image.stem.split("_")[-1]
+                )
+
+                highest = max(highest, number)
+
+            except:
+
+                pass
+
         for image in self.train_images.glob("*.jpg"):
 
             try:
@@ -133,6 +148,21 @@ class DatasetManager:
         }
 
         return stats
+
+    def labeled_stats(self):
+        """Anzahl Trainings-/Validierungsbilder und wie viele davon mindestens eine Box haben."""
+        with_boxes = 0
+        for label_dir in (self.train_labels, self.val_labels):
+            for label in label_dir.glob("*.txt"):
+                if label.stat().st_size > 0:
+                    with_boxes += 1
+
+        return {
+            "train": len(list(self.train_images.glob("*.jpg"))),
+            "val": len(list(self.val_images.glob("*.jpg"))),
+            "with_boxes": with_boxes,
+            "review": len(list(self.review_images.glob("*.jpg"))),
+        }
     
     
 
