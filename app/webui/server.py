@@ -55,6 +55,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 OUTPUT_DIR = r"D:\EDITED CLIPS\Skript Cutted\Fertig zur Finalisierung"
 
 SETTINGS_SCHEMA = [
+    ("ignore_audio", "Nur YOLO-Events (Audio ignorieren)", "bool", "Audio wird bei der Clip-Erkennung gar nicht beachtet: keine Audio-Peaks, kein Lautstaerke-Bonus, keine Stille-Luecken (Stufe 2) und kein Mikro-Trim (Stufe 3). Nur YOLO-Events bestimmen die Clips. Die Audio-Einstellungen darunter greifen dann nicht"),
     ("audio_threshold_percentile", "Audio Peak-Threshold Percentile", "float", "Ab welchem RMS-Percentile ein Audio-Punkt zaehlt (hoch = nur sehr laute Stellen)"),
     ("cluster_max_gap_sec", "Cluster Max. Abstand (s)", "float", "Max. Abstand (s) zwischen Punkten im selben Cluster"),
     ("audio_pre_buffer_sec", "Audio Pre-Buffer (s)", "float", "Puffer VOR einem Audio-Peak-Cluster"),

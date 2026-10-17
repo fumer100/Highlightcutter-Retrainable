@@ -94,6 +94,7 @@ except ImportError:
 @dataclass
 class Config:
     # --- Phase A: Trigger-Erkennung ---
+    ignore_audio: bool = False  # True = Audio wird nirgends beachtet, nur YOLO-Events bestimmen die Clips
     audio_threshold_percentile: float = 92   # Schwelle fuer Audio-Peak-Punkte
     yolo_model_path: str | None = None
     yolo_sample_every_n_frames: int = 5
@@ -308,14 +309,17 @@ def collect_trigger_points(
     PHASE A: Sammelt ALLE Trigger-Punkte unabhaengig voneinander.
     Jeder Punkt: {"time": float, "type": "audio"|"yolo"}
     """
-    peak_threshold = np.percentile(rms, cfg.audio_threshold_percentile)
-    print(f"[Phase A] Audio-Peak-Threshold (P{cfg.audio_threshold_percentile}): {peak_threshold:.4f}")
-
     points = []
 
-    for i in range(len(rms)):
-        if rms[i] >= peak_threshold:
-            points.append({"time": float(times[i]), "type": "audio", "rms": float(rms[i])})
+    if cfg.ignore_audio:
+        print("[Phase A] Audio ignoriert - nur YOLO-Events zaehlen als Trigger.")
+    else:
+        peak_threshold = np.percentile(rms, cfg.audio_threshold_percentile)
+        print(f"[Phase A] Audio-Peak-Threshold (P{cfg.audio_threshold_percentile}): {peak_threshold:.4f}")
+
+        for i in range(len(rms)):
+            if rms[i] >= peak_threshold:
+                points.append({"time": float(times[i]), "type": "audio", "rms": float(rms[i])})
 
     for t in yolo_event_times:
         points.append({"time": float(t), "type": "yolo", "rms": None})
@@ -419,7 +423,7 @@ def compute_cluster_window(
     current_end = raw_end
     loud_bonus = 0.0
 
-    for _ in range(5):  # wenige Iterationen reichen zur Stabilisierung
+    for _ in range(0 if cfg.ignore_audio else 5):  # wenige Iterationen reichen zur Stabilisierung
         mask = (times >= raw_start) & (times <= current_end)
         window_times = times[mask]
         window_rms = rms[mask]
@@ -447,9 +451,10 @@ def compute_cluster_window(
     final_end = min(raw_end + loud_bonus, first_point["time"] + cfg.max_clip_duration_sec)
     final_end = min(final_end, times[-1])
 
+    loud_info = ("Audio ignoriert" if cfg.ignore_audio
+                 else f"Lautstaerke-Bonus {loud_bonus:.1f}s (P{cfg.loud_threshold_percentile} im Fenster)")
     end_reason = (f"letzter Punkt @ {fmt_time(last_point['time'])} + Basis {base_post:.1f}s "
-                  f"+ Groessen-Bonus {size_bonus:.1f}s ({density_info}) "
-                  f"+ Lautstaerke-Bonus {loud_bonus:.1f}s (P{cfg.loud_threshold_percentile} im Fenster)")
+                  f"+ Groessen-Bonus {size_bonus:.1f}s ({density_info}) + {loud_info}")
 
     return {
         "start": raw_start,
@@ -563,6 +568,9 @@ def score_and_filter_windows(
         _build_scoring_payload(w, rms, times, transcript_segments, game_name, game_context)
         for w in windows
     ]
+    if cfg.ignore_audio:
+        for p in payloads:
+            p.pop("loud_ratio_in_window", None)
 
     print(f"\n[Scoring] Bewerte {len(payloads)} Fenster per LLM ({cfg.llm_provider}/{cfg.llm_model}) ...")
     results = _llm_score_windows(
@@ -605,7 +613,7 @@ def remove_internal_gaps(
 ) -> list[tuple[float, float]]:
     start, end = clip
 
-    if not cfg.enable_internal_gap_removal:
+    if not cfg.enable_internal_gap_removal or cfg.ignore_audio:
         return [clip]
 
     silence_threshold = np.percentile(rms, cfg.internal_silence_threshold_percentile)
@@ -670,7 +678,7 @@ def micro_trim_edge(
     times: np.ndarray,
     cfg: Config,
 ) -> float:
-    if not cfg.enable_micro_trim:
+    if not cfg.enable_micro_trim or cfg.ignore_audio:
         return target_time
 
     window = cfg.micro_trim_search_window_sec
@@ -701,7 +709,7 @@ def apply_micro_trim_to_segments(
     times: np.ndarray,
     cfg: Config,
 ) -> list[tuple[float, float]]:
-    if not cfg.enable_micro_trim:
+    if not cfg.enable_micro_trim or cfg.ignore_audio:
         return segments
 
     trimmed = []
@@ -981,9 +989,15 @@ def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, canc
 
         yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback, cancel_event)
         empty_result["yolo_event_times"] = yolo_event_times
-        if progress_callback is not None:
-            progress_callback("Audio-Analyse", 0.0)
-        rms, times = compute_rms(video_path)
+        if cfg.ignore_audio:
+            print("[Audio] Audio-Analyse uebersprungen (nur YOLO-Events).")
+            # Platzhalter-Zeitachse, damit Fenster-Berechnung/Kappung auf die Videolaenge weiter funktioniert
+            times = np.append(np.arange(0.0, duration, 0.05), duration)
+            rms = np.zeros(len(times), dtype=float)
+        else:
+            if progress_callback is not None:
+                progress_callback("Audio-Analyse", 0.0)
+            rms, times = compute_rms(video_path)
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Vorgang abgebrochen.")
         if progress_callback is not None:
