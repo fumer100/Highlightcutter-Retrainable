@@ -35,6 +35,7 @@ from app.cutter.highlight_cutter_pointbased import (
 )
 from app.core.pipeline_controller import PipelineController
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
+from app.core.adaptive_thresholds import resolve_ml_params
 from app.core.model_tester import test_model_on_video
 from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
@@ -93,9 +94,9 @@ SETTINGS_SCHEMA = [
     ("enable_speech_to_text", "Speech-to-Text aktiv", "bool", "Audiospur transkribieren, damit das LLM Humor/Kommentare mitbewerten kann"),
     ("whisper_model_size", "Whisper-Modellgroesse", "choice", "Groesser = genauer aber langsamer (tiny/base/small/medium/large-v3)"),
     ("whisper_language", "Whisper-Sprache (leer = Auto)", "text", "Sprachcode wie 'de' oder 'en', leer lassen fuer automatische Erkennung"),
-    ("ml_auto_train_threshold", "ML: Auto-Training ab Konfidenz", "float", "Bilder, bei denen auch die SCHWAECHSTE Box mindestens so sicher ist, gehen ohne Review direkt ins Training (0.0-1.0)"),
-    ("ml_review_min_confidence", "ML: Review ab Konfidenz", "float", "Zwischen diesem Wert und der Auto-Training-Schwelle landet ein Bild in der Review Queue, darunter (nichts erkannt) wird es verworfen"),
-    ("ml_max_review_per_video", "ML: Max. Review-Bilder pro Video", "int", "Begrenzt die Review Queue pro Video auf die unsichersten Bilder (0 = unbegrenzt)"),
+    ("ml_auto_train_threshold", "ML: Auto-Training ab Konfidenz", "float", "Bilder, bei denen auch die SCHWAECHSTE Box mindestens so sicher ist, gehen ohne Review direkt ins Training (0.0-1.0). Gilt nicht bei Spielen mit automatischer Stufen-Schwelle (Spiel bearbeiten)"),
+    ("ml_review_min_confidence", "ML: Review ab Konfidenz", "float", "Zwischen diesem Wert und der Auto-Training-Schwelle landet ein Bild in der Review Queue, darunter (nichts erkannt) wird es verworfen. Gilt nicht bei automatischer Stufen-Schwelle"),
+    ("ml_max_review_per_video", "ML: Max. Review-Bilder pro Video", "int", "Begrenzt die Review Queue pro Video auf die unsichersten Bilder (0 = unbegrenzt). Gilt nicht bei automatischer Stufen-Schwelle"),
     ("ml_event_group_gap_sec", "ML: Event-Zusammenfassung (s)", "float", "Erkennungen mit kleinerem zeitlichen Abstand gelten als ein Event"),
     ("ml_frames_per_event", "ML: Frames pro Event", "int", "Wie viele Frames pro Event extrahiert werden"),
     ("ml_duplicate_threshold", "ML: Duplikat-Schwelle", "float", "Frames, die einem schon gespeicherten Frame so aehnlich sind (mittlere Grauwert-Abweichung 0-255), werden uebersprungen"),
@@ -125,20 +126,32 @@ def _add_ml_stats(totals: dict, stats: dict):
         totals["conf_buckets"][label] = totals["conf_buckets"].get(label, 0) + n
 
 
-def _build_ml_report(totals: dict, cfg: Config) -> dict:
+def _build_ml_report(totals: dict, cfg: Config, params: dict) -> dict:
     auto = totals["auto_train"] + totals["auto_val"]
+    auto_on = params["auto_threshold"] <= 1.0
+    auto_hint = (
+        f"schwaechste Box >= {params['auto_threshold']:.2f} (davon {totals['auto_val']} in val)"
+        if auto_on else "in dieser Stufe aus - alles geht durch deine Review"
+    )
+    review_hint = (
+        f"Konfidenz {params['review_min']:.2f}-{params['auto_threshold']:.2f}"
+        if auto_on else f"Konfidenz ab {params['review_min']:.2f}"
+    )
+    stage_hint = (
+        f"automatisch nach Datenstand ({params['labeled_images']} gelabelte Bilder mit Boxen)"
+        if params["adaptive"] else "feste Werte aus den Einstellungen"
+    )
     rows = [
+        ("Schwellen-Stufe", params["stage"], stage_hint),
         ("Erkennungen im Video", totals["events"], "YOLO-Treffer auf den geprueften Frames"),
         ("Zusammengefasste Events", totals["groups"], f"Treffer < {cfg.ml_event_group_gap_sec:g}s Abstand = 1 Event"),
         ("Duplikate uebersprungen", totals["duplicates"], "fast identische Frames"),
         ("Frames vorgelabelt", totals["candidates"], "gespeicherte Kandidaten"),
-        ("Auto -> Training", auto,
-         f"schwaechste Box >= {cfg.ml_auto_train_threshold:.2f} (davon {totals['auto_val']} in val)"),
-        ("Zur Review", totals["review"],
-         f"Konfidenz {cfg.ml_review_min_confidence:.2f}-{cfg.ml_auto_train_threshold:.2f}"),
+        ("Auto -> Training", auto, auto_hint),
+        ("Zur Review", totals["review"], review_hint),
         ("Review-Limit gekappt", totals["review_capped"],
-         f"mehr als {cfg.ml_max_review_per_video} pro Video, am wenigsten unsichere entfernt"),
-        ("Verworfen", totals["discarded"], f"nichts >= {cfg.ml_review_min_confidence:.2f} erkannt"),
+         f"mehr als {params['max_review']} pro Video, am wenigsten unsichere entfernt"),
+        ("Verworfen", totals["discarded"], f"nichts >= {params['review_min']:.2f} erkannt"),
     ]
     buckets = [{"label": k, "count": v} for k, v in totals["conf_buckets"].items()]
 
@@ -421,6 +434,7 @@ class Core:
                 "review_queue_path": f"review_queue/{name}",
                 "classes": classes,
                 "event_classes": list(classes),  # neue Spiele: alle eigenen Klassen werden von YOLO erkannt/als Event genutzt
+                "adaptive_thresholds": True,  # neue Spiele: ML-Schwellen wachsen mit dem Datenstand
             }
 
             with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -475,6 +489,8 @@ class Core:
             "isLast": len(GAMES) <= 1,
             # Klassen duerfen nur erweitert werden, sobald Modell oder Labels existieren
             "classesLocked": game.model_path.is_file() or stats["with_boxes"] > 0,
+            "adaptiveThresholds": game.adaptive_thresholds,
+            "stage": resolve_ml_params(self.cfg, True, stats["with_boxes"]),
         }
 
     def delete_game(self, name: str, confirm_name: str):
@@ -532,7 +548,7 @@ class Core:
             "problems": problems,
         }
 
-    def edit_game(self, name: str, classes: list):
+    def edit_game(self, name: str, classes: list, adaptive_thresholds: bool | None = None):
         if name not in GAMES:
             return {"ok": False, "error": f"Unbekanntes Spiel: {name}"}
         if self.cancel_event is not None:
@@ -564,6 +580,9 @@ class Core:
             if entry.get("event_classes") is not None:
                 # Spiele mit eigenen Event-Klassen (neu angelegt): alle Klassen bleiben Event-Klassen
                 entry["event_classes"] = list(classes)
+            # Nur schreiben, wenn der Nutzer den Schalter wirklich geaendert hat
+            if adaptive_thresholds is not None and bool(adaptive_thresholds) != GAMES[name].adaptive_thresholds:
+                entry["adaptive_thresholds"] = bool(adaptive_thresholds)
             with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(raw, f, indent=2, ensure_ascii=False)
             reload_games()
@@ -686,7 +705,12 @@ class Core:
             total = len(video_paths)
             totals = _new_ml_totals()
             total_clips = 0
-
+            dm = self._dm()
+            params = resolve_ml_params(self.cfg, dm.game.adaptive_thresholds, dm.labeled_stats()["with_boxes"])
+            auto_txt = f"{params['auto_threshold']:.2f}" if params["auto_threshold"] <= 1.0 else "aus"
+            print(f"[ML] Schwellen-Stufe '{params['stage']}' ({params['labeled_images']} gelabelte Bilder): "
+                  f"Auto-Training {auto_txt}, Review ab {params['review_min']:.2f}, "
+                  f"max. {params['max_review']} Review-Bilder pro Video")
             for idx, video in enumerate(video_paths, start=1):
                 if cancel_event.is_set():
                     raise RuntimeError("Vorgang abgebrochen.")
@@ -724,9 +748,9 @@ class Core:
                     event_group_gap_sec=self.cfg.ml_event_group_gap_sec,
                     frames_per_event=self.cfg.ml_frames_per_event,
                     duplicate_threshold=self.cfg.ml_duplicate_threshold,
-                    auto_threshold=self.cfg.ml_auto_train_threshold,
-                    review_min_confidence=self.cfg.ml_review_min_confidence,
-                    max_review_per_video=self.cfg.ml_max_review_per_video,
+                    auto_threshold=params["auto_threshold"],
+                    review_min_confidence=params["review_min"],
+                    max_review_per_video=params["max_review"],
                     progress_callback=progress_cb,
                     status_callback=lambda text: self._push("status", text),
                     cancel_event=cancel_event,
@@ -734,7 +758,7 @@ class Core:
                 _add_ml_stats(totals, stats)
                 self._push("overallProgress", {"idx": idx, "total": total})
 
-            report = _build_ml_report(totals, self.cfg)
+            report = _build_ml_report(totals, self.cfg, params)
             print("\n" + report["text"])
             self._push("mlReport", report)
             self._push("reviewCount", self._review_count())
@@ -1121,7 +1145,7 @@ def api_delete_game():
 @app.route("/api/edit_game", methods=["POST"])
 def api_edit_game():
     d = request.get_json(force=True)
-    return jsonify(core.edit_game(d.get("name"), d.get("classes")))
+    return jsonify(core.edit_game(d.get("name"), d.get("classes"), d.get("adaptiveThresholds")))
 
 
 @app.route("/api/start_processing", methods=["POST"])

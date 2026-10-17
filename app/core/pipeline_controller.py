@@ -4,7 +4,7 @@ from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
 from app.pseudo_label.auto_annotator import AutoAnnotator
 
-CONFIDENCE_BUCKETS = [(0.25, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01)]
+CONFIDENCE_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.7), (0.7, 0.85), (0.85, 1.01)]
 
 
 def group_events(times: list[float], gap_sec: float) -> list[list[float]]:
@@ -105,8 +105,8 @@ class PipelineController:
         print(f"      {len(sample_ids)} Frames gespeichert, {duplicates} Duplikate uebersprungen")
 
         # 3/4: Vorlabeln und sortieren
-        step(3, f"Vorlabeln (auto >= {auto_threshold:.2f}, Review {review_min_confidence:.2f}-{auto_threshold:.2f}, "
-                f"darunter verwerfen)")
+        step(3, "Vorlabeln (" + (f"Auto-Training ab {auto_threshold:.2f}, " if auto_threshold <= 1.0 else "Auto-Training aus, ")
+                + f"Review ab {review_min_confidence:.2f}, darunter verwerfen)")
         review_samples = []
         for i, sample_id in enumerate(sample_ids, start=1):
             check_cancel()

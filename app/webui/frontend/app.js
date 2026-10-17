@@ -396,6 +396,13 @@ async function openEditGameModal() {
     `Modell: ${info.hasModel ? "vorhanden" : "noch keins"}\n` +
     `Bilder: ${info.train} train, ${info.val} val, ${info.review} in der Review Queue`;
   document.getElementById("editGameClasses").value = info.classes.join(", ");
+  document.getElementById("editGameAdaptive").checked = !!info.adaptiveThresholds;
+  const st = info.stage;
+  const autoTxt = st.auto_threshold <= 1 ? st.auto_threshold.toFixed(2) : "aus";
+  document.getElementById("editGameAdaptiveHint").textContent =
+    `An: Auto-Training und Review-Grenzen wachsen mit den gelabelten Bildern (Start <100, Aufbau <500, Reif <2000, Stabil darüber). ` +
+    `Aus: deine festen ML-Einstellungen gelten. Aktuelle Stufe bei ${info.withBoxes} gelabelten Bildern: ` +
+    `${st.stage} (Auto-Training ${autoTxt}, Review ab ${st.review_min.toFixed(2)}, max. ${st.max_review} Bilder pro Video).`;
   document.getElementById("editGameHint").textContent = info.classesLocked
     ? "Es gibt schon ein Modell bzw. gelabelte Bilder: Bestehende Klassen können nicht umbenannt, umsortiert " +
       "oder entfernt werden. Neue Klassen nur am Ende ergänzen (z.B. „..., neue_klasse“)."
@@ -410,7 +417,11 @@ function closeEditGameModal() {
 async function saveEditGame() {
   const classes = document.getElementById("editGameClasses").value
     .split(",").map((c) => c.trim()).filter(Boolean);
-  const res = await apiPost("/api/edit_game", { name: state.editTarget, classes });
+  const res = await apiPost("/api/edit_game", {
+    name: state.editTarget,
+    classes,
+    adaptiveThresholds: document.getElementById("editGameAdaptive").checked,
+  });
   if (res.ok) {
     applyState(res.state);
     closeEditGameModal();

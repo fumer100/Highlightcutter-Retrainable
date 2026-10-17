@@ -18,6 +18,9 @@ class Game:
     # Klassen, die Highlight-Events ausloesen. None = globaler Standard (Config.yolo_target_classes),
     # damit bestehende Spiele ohne dieses Feld unveraendert weiterlaufen.
     event_classes: list[str] | None = None
+    # True = ML-Schwellen (Auto-Training/Review) wachsen automatisch mit dem Datenstand.
+    # Fehlt das Feld (bestehende Spiele), bleibt es aus und die festen Einstellungen gelten.
+    adaptive_thresholds: bool = False
 
 
 REQUIRED_FIELDS = ["model_path", "dataset_path", "review_queue_path", "classes"]
@@ -69,6 +72,8 @@ def _validate_game_entry(name: str, cfg: dict):
         )
 
     llm_context = cfg.get("llm_context")
+    if not isinstance(cfg.get("adaptive_thresholds", False), bool):
+        raise GamesConfigError(f"Spiel '{name}': 'adaptive_thresholds' muss true oder false sein.")
     event_classes = cfg.get("event_classes")
     if event_classes is not None:
         if (
@@ -128,6 +133,7 @@ def _load_games() -> dict[str, Game]:
             classes=cfg["classes"],
             llm_context=cfg.get("llm_context", {}),
             event_classes=cfg.get("event_classes"),
+            adaptive_thresholds=cfg.get("adaptive_thresholds", False),
         )
 
     return games
