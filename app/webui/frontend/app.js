@@ -187,6 +187,13 @@ function bindEvents() {
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   });
 
+  document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", async () => {
+    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+    setBusy(true);
+    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos, exportFcpxml: true });
+    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  });
+
   document.getElementById("exportFcpxmlBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
     setBusy(true);
@@ -426,7 +433,7 @@ function onReviewCount(count) {
 
 function setBusy(busy) {
   document.getElementById("busyOverlay").classList.toggle("hidden", !busy);
-  ["startBtn", "mlPipelineBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
+  ["startBtn", "mlPipelineBtn", "mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
     document.getElementById(id).disabled = busy;
   });
   document.getElementById("cancelBtn").disabled = !busy;

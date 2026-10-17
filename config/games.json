@@ -23,6 +23,14 @@
       "llm_context": {
         "Kill/Assist": "Einziges Signal - je mehr davon dicht beieinander, desto wertvoller (Mehrfach-Kill/Serie)."
       }
+    },
+    "Wardogs": {
+      "model_path": "models/Wardogs/current.pt",
+      "dataset_path": "datasets/Wardogs",
+      "review_queue_path": "review_queue/Wardogs",
+      "classes": [
+        "Kill"
+      ]
     }
   }
 }

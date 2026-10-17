@@ -1,0 +1,13 @@
+{
+    "sample_id": "THE_FINALS_00001579",
+    "game": "The Finals",
+    "image_path": "D:\\TurkishCowboy Video Editor\\HighlichtCutter - Retrainable\\review_queue\\THE FINALS\\images\\THE_FINALS_00001579.jpg",
+    "label_path": "D:\\TurkishCowboy Video Editor\\HighlichtCutter - Retrainable\\review_queue\\THE FINALS\\labels\\THE_FINALS_00001579.txt",
+    "video_name": "Win MSS.mkv",
+    "frame_number": 58642,
+    "confidence": 0.0,
+    "model_version": "v1",
+    "reviewed": true,
+    "accepted": false,
+    "source_clip": ""
+}

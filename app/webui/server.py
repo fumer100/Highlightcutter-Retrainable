@@ -381,16 +381,21 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
-    def run_ml_pipeline(self, video_paths: list):
+    def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False):
+        """export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden."""
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
         self.cancel_event = threading.Event()
-        threading.Thread(target=self._ml_pipeline_worker, args=(list(video_paths), self.cancel_event), daemon=True).start()
+        threading.Thread(
+            target=self._ml_pipeline_worker,
+            args=(list(video_paths), self.cancel_event, bool(export_fcpxml)),
+            daemon=True,
+        ).start()
         return {"ok": True}
 
-    def _ml_pipeline_worker(self, video_paths, cancel_event):
+    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
@@ -399,6 +404,7 @@ class Core:
             self._sync_model_path()
             total = len(video_paths)
             total_extracted = total_annotated = total_needs_review = 0
+            total_clips = 0
 
             for idx, video in enumerate(video_paths, start=1):
                 if cancel_event.is_set():
@@ -406,17 +412,26 @@ class Core:
 
                 self._push("status", f"ML-Pipeline: {os.path.basename(video)}")
                 base = os.path.splitext(os.path.basename(video))[0]
-                output_path = os.path.join(OUTPUT_DIR, f"{base}_highlight.mp4")
-
-                result = process_video(
+                analysis_kwargs = dict(
                     video_path=video,
-                    output_path=output_path,
                     cfg=self.cfg,
                     progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
                     cancel_event=cancel_event,
                     game_name=self.current_game,
                     game_context=self._dm().game.llm_context,
                 )
+
+                if export_fcpxml:
+                    result = export_fcpxml_timeline(
+                        output_path=os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml"),
+                        **analysis_kwargs,
+                    )
+                    total_clips += result["clip_count"]
+                else:
+                    result = process_video(
+                        output_path=os.path.join(OUTPUT_DIR, f"{base}_highlight.mp4"),
+                        **analysis_kwargs,
+                    )
 
                 stats = self._pc().run_full_cycle(video_path=video, events=result["yolo_event_times"])
                 total_extracted += stats["extracted"]
@@ -426,13 +441,14 @@ class Core:
 
             self._push("reviewCount", self._review_count())
             self._push("status", "ML-Pipeline fertig")
-            self._push("done", {
-                "message": (
-                    f"{total_extracted} Frames extrahiert\n"
-                    f"{total_annotated} automatisch annotiert\n"
-                    f"{total_needs_review} Frames benoetigen manuelle Korrektur"
-                ),
-            })
+            message = (
+                f"{total_extracted} Frames extrahiert\n"
+                f"{total_annotated} automatisch annotiert\n"
+                f"{total_needs_review} Frames benoetigen manuelle Korrektur"
+            )
+            if export_fcpxml:
+                message += f"\n{total_clips} Clips als FCPXML exportiert (KEIN Video geschnitten)"
+            self._push("done", {"message": message})
         except Exception as e:
             self._push("cancelled" if cancel_event.is_set() else "error", str(e))
         finally:
@@ -684,7 +700,8 @@ def api_start_processing():
 
 @app.route("/api/run_ml_pipeline", methods=["POST"])
 def api_run_ml_pipeline():
-    return jsonify(core.run_ml_pipeline(request.get_json(force=True).get("videos", [])))
+    data = request.get_json(force=True)
+    return jsonify(core.run_ml_pipeline(data.get("videos", []), bool(data.get("exportFcpxml", False))))
 
 
 @app.route("/api/export_fcpxml", methods=["POST"])
