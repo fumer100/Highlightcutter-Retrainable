@@ -30,7 +30,9 @@ root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if root_path not in sys.path:
     sys.path.insert(0, root_path)
 
-from app.cutter.highlight_cutter_pointbased import Config, process_video, export_fcpxml_timeline
+from app.cutter.highlight_cutter_pointbased import (
+    Config, export_fcpxml_timeline, preload_yolo_events, process_video,
+)
 from app.core.pipeline_controller import PipelineController
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
 from app.core.model_tester import test_model_on_video
@@ -655,8 +657,11 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
-    def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False):
-        """export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden."""
+    def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False, ml_only: bool = False):
+        """
+        export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden.
+        ml_only=True: nur Events erkennen + ML-Pipeline (Daten sammeln), weder schneiden noch FCPXML.
+        """
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
         if (err := self._require_model()):
@@ -666,12 +671,12 @@ class Core:
         self.cancel_event = threading.Event()
         threading.Thread(
             target=self._ml_pipeline_worker,
-            args=(list(video_paths), self.cancel_event, bool(export_fcpxml)),
+            args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only)),
             daemon=True,
         ).start()
         return {"ok": True}
 
-    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False):
+    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
@@ -698,7 +703,10 @@ class Core:
                     game_context=self._dm().game.llm_context,
                 )
 
-                if export_fcpxml:
+                if ml_only:
+                    events = sorted(preload_yolo_events(video, self.cfg, progress_cb, cancel_event))
+                    result = {"yolo_event_times": events}
+                elif export_fcpxml:
                     result = export_fcpxml_timeline(
                         output_path=os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml"),
                         **analysis_kwargs,
@@ -1124,7 +1132,9 @@ def api_start_processing():
 @app.route("/api/run_ml_pipeline", methods=["POST"])
 def api_run_ml_pipeline():
     data = request.get_json(force=True)
-    return jsonify(core.run_ml_pipeline(data.get("videos", []), bool(data.get("exportFcpxml", False))))
+    return jsonify(core.run_ml_pipeline(
+        data.get("videos", []), bool(data.get("exportFcpxml", False)), bool(data.get("mlOnly", False))
+    ))
 
 
 @app.route("/api/test_model", methods=["POST"])

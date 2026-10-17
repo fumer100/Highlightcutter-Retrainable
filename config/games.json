@@ -29,7 +29,10 @@
       "dataset_path": "datasets/Wardogs",
       "review_queue_path": "review_queue/Wardogs",
       "classes": [
-        "Kill"
+        "Kill/Assist"
+      ],
+      "event_classes": [
+        "Kill/Assist"
       ]
     }
   }

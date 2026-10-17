@@ -97,7 +97,7 @@ function renderBootstrapBanner() {
 
 function updateActionButtons() {
   const needsModel = state.currentGame && !state.hasModel;
-  const modelButtons = ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "testModelBtn"];
+  const modelButtons = ["mlOnlyBtn", "mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "testModelBtn"];
   modelButtons.forEach((id) => {
     document.getElementById(id).disabled = state.busy || needsModel;
   });
@@ -263,6 +263,13 @@ function bindEvents() {
   //   const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos });
   //   if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   // });
+
+  document.getElementById("mlOnlyBtn").addEventListener("click", async () => {
+    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+    setBusy(true);
+    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos, mlOnly: true });
+    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  });
 
   document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
