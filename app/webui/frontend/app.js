@@ -299,7 +299,10 @@ function bindEvents() {
     if (!res.ok) showToast(res.error, "error");
   });
 
-  document.getElementById("trainBtn").addEventListener("click", async () => {
+  document.getElementById("trainBtn").addEventListener("click", openTrainOverview);
+  document.getElementById("trainOverviewCancelBtn").addEventListener("click", closeTrainOverview);
+  document.getElementById("trainOverviewStartBtn").addEventListener("click", async () => {
+    closeTrainOverview();
     setBusy(true);
     const res = await apiPost("/api/run_training");
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
@@ -387,6 +390,54 @@ function updateGameSourceRows() {
   const source = document.querySelector('input[name="gameSource"]:checked').value;
   document.getElementById("sourceModelRow").classList.toggle("hidden", source !== "model");
   document.getElementById("sourceVideoRow").classList.toggle("hidden", source !== "video");
+}
+
+async function openTrainOverview() {
+  const o = await apiGet("/api/training_overview");
+  if (!o.ok) { showToast(o.error, "error"); return; }
+
+  const now = o.now, last = o.last;
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const delta = (a, b) => {
+    if (b === null || b === undefined) return "–";
+    const d = a - b;
+    return d > 0 ? `+${d}` : String(d);
+  };
+  const row = (label, nowVal, lastVal) =>
+    `<tr><td>${esc(label)}</td><td class="num">${lastVal ?? "–"}</td><td class="num">${nowVal}</td>` +
+    `<td class="num">${delta(nowVal, lastVal)}</td></tr>`;
+
+  document.getElementById("trainOverviewTitle").textContent =
+    o.firstModel ? `Erstes Modell trainieren – ${o.game}` : `Modell neu trainieren – ${o.game}`;
+  document.getElementById("trainOverviewSummary").textContent = last
+    ? `Letztes Training: ${o.lastTimestamp} (insgesamt ${o.trainingCount} erfasst)\n` +
+      `Seit dem letzten Training: ${o.added} neue und ${o.removed} entfernte Bilder.`
+    : o.firstModel
+      ? "Das ist das erste Training für dieses Spiel."
+      : "Für dieses Spiel ist noch kein früherer Trainingsstand erfasst – ab jetzt wird jeder Stand gespeichert, " +
+        "der nächste Vergleich ist dann möglich.";
+
+  let rows = row("Trainingsbilder", now.train, last?.train) + row("Validierungsbilder", now.val, last?.val) +
+    row("Bilder gesamt", now.total, last?.total) + row("davon mit Boxen", now.with_boxes, last?.with_boxes) +
+    row("Boxen gesamt", now.boxes, last?.boxes);
+  const names = [...new Set([...Object.keys(now.per_class), ...Object.keys(last?.per_class ?? {})])];
+  names.forEach((n) => { rows += row(`Boxen „${n}“`, now.per_class[n] ?? 0, last ? (last.per_class[n] ?? 0) : null); });
+  document.getElementById("trainOverviewRows").innerHTML = rows;
+
+  const hints = [];
+  if (o.reviewPending) hints.push(`${o.reviewPending} Bilder warten noch in der Review Queue und werden NICHT mittrainiert.`);
+  if (last && o.added === 0) hints.push("Keine neuen Daten seit dem letzten Training – ein erneutes Training bringt vermutlich nichts.");
+  if (o.problem) hints.push(o.problem);
+  const hintEl = document.getElementById("trainOverviewHint");
+  hintEl.textContent = hints.join("\n");
+  hintEl.classList.toggle("hidden", !hints.length);
+
+  document.getElementById("trainOverviewStartBtn").disabled = !!o.problem;
+  document.getElementById("trainOverviewModal").classList.remove("hidden");
+}
+
+function closeTrainOverview() {
+  document.getElementById("trainOverviewModal").classList.add("hidden");
 }
 
 function openTestModelModal() {

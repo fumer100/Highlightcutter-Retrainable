@@ -37,6 +37,7 @@ from app.core.model_tester import test_model_on_video
 from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
 from app.training.trainer import Trainer
+from app.training.training_history import append_history, build_training_overview, compute_dataset_snapshot
 from config.games import (
     GAMES,
     GAMES_CONFIG_FILE,
@@ -610,6 +611,11 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
+    def get_training_overview(self):
+        if not self.current_game:
+            return {"ok": False, "error": "Kein Spiel ausgewaehlt."}
+        return {"ok": True, **build_training_overview(self._dm(), FIRST_MODEL_MIN_LABELED)}
+
     def run_training(self):
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
@@ -646,7 +652,11 @@ class Core:
                 base_weights=str(base_weights) if base_weights.is_file() else "yolo26n.pt",
             )
             self._push("status", "Erstes Modell wird trainiert..." if first_model else "Training laeuft...")
-            trainer.train(epochs=60 if first_model else 30, img_size=640, cancel_event=cancel_event)
+            epochs = 60 if first_model else 30
+            # Datenstand VOR dem Training merken: genau damit wird trainiert
+            snapshot = compute_dataset_snapshot(dm)
+            trainer.train(epochs=epochs, img_size=640, cancel_event=cancel_event)
+            append_history(dm.game.model_path, snapshot, epochs, first_model)
             self._push("status", "Training fertig")
 
             # Gecachte Pipeline nutzt sonst weiter das alte (bzw. kein) Modell
@@ -981,6 +991,11 @@ def api_open_test_output():
 @app.route("/api/export_fcpxml", methods=["POST"])
 def api_export_fcpxml():
     return jsonify(core.export_fcpxml(request.get_json(force=True).get("videos", [])))
+
+
+@app.route("/api/training_overview")
+def api_training_overview():
+    return jsonify(core.get_training_overview())
 
 
 @app.route("/api/run_training", methods=["POST"])
