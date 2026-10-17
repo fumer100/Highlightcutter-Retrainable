@@ -84,6 +84,7 @@ function connectEvents() {
       case "error": onError(data); break;
       case "cancelled": onCancelled(data); break;
       case "reviewCount": onReviewCount(data); break;
+      case "mlReport": onMlReport(data); break;
     }
   };
   es.onerror = () => {
@@ -173,19 +174,20 @@ function bindEvents() {
     renderSettings(res.settingsSchema);
   });
 
-  document.getElementById("startBtn").addEventListener("click", async () => {
-    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
-    setBusy(true);
-    const res = await apiPost("/api/start_processing", { videos: state.videos });
-    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
-  });
-
-  document.getElementById("mlPipelineBtn").addEventListener("click", async () => {
-    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
-    setBusy(true);
-    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos });
-    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
-  });
+  // Schneiden-Buttons (aktuell ausgeblendet, siehe index.html)
+  // document.getElementById("startBtn").addEventListener("click", async () => {
+  //   if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+  //   setBusy(true);
+  //   const res = await apiPost("/api/start_processing", { videos: state.videos });
+  //   if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  // });
+  //
+  // document.getElementById("mlPipelineBtn").addEventListener("click", async () => {
+  //   if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+  //   setBusy(true);
+  //   const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos });
+  //   if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  // });
 
   document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
@@ -431,9 +433,19 @@ function onReviewCount(count) {
   updateReviewBadge(count);
 }
 
+function onMlReport(report) {
+  const fill = (id, rowsHtml) => { document.getElementById(id).innerHTML = rowsHtml; };
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  fill("mlReportRows", report.rows.map((r) =>
+    `<tr><td>${esc(r.label)}</td><td class="num">${r.value}</td><td class="hint">${esc(r.hint)}</td></tr>`).join(""));
+  fill("mlReportBuckets", report.buckets.map((b) =>
+    `<tr><td>${esc(b.label)}</td><td class="num">${b.count}</td><td></td></tr>`).join(""));
+  document.getElementById("mlReportPanel").classList.remove("hidden");
+}
+
 function setBusy(busy) {
   document.getElementById("busyOverlay").classList.toggle("hidden", !busy);
-  ["startBtn", "mlPipelineBtn", "mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
+  ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "trainBtn"].forEach((id) => {
     document.getElementById(id).disabled = busy;
   });
   document.getElementById("cancelBtn").disabled = !busy;

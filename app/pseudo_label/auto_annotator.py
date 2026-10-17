@@ -12,18 +12,19 @@ from app.dataset.sample_metadata import SampleMetadata
 class AutoAnnotator:
 
     """
-    Führt YOLO auf Frames aus und erzeugt Pseudo-Labels.
-    Entscheidet automatisch:
-    - Train (high confidence)
-    - Review (low confidence)
+    Fuehrt YOLO auf Frames aus und erzeugt Pseudo-Labels.
+    Entscheidet anhand der SCHWAECHSTEN Box im Bild:
+    - min_conf >= confidence_threshold          -> automatisch ins Training (train/val)
+    - review_threshold <= min_conf < threshold  -> Review Queue (unsicher)
+    - keine Box >= review_threshold             -> verworfen (nichts erkannt)
     """
 
     def __init__(
         self,
         dataset_manager: DatasetManager,
         model_path: str,
-        confidence_threshold: float = 0.6,
-        review_threshold: float = 0.4
+        confidence_threshold: float = 0.85,
+        review_threshold: float = 0.25
     ):
 
         self.dm = dataset_manager
@@ -36,7 +37,16 @@ class AutoAnnotator:
         self.review_threshold = review_threshold
 
 
-    def annotate_sample(self, sample_id: str, model_version: str = "v1"):
+    def annotate_sample(
+        self,
+        sample_id: str,
+        model_version: str = "v1",
+        auto_threshold: float | None = None,
+        min_confidence: float | None = None,
+    ):
+        auto_threshold = self.confidence_threshold if auto_threshold is None else auto_threshold
+        min_confidence = self.review_threshold if min_confidence is None else min_confidence
+
         image_path = self.dm.review_images / f"{sample_id}.jpg"
         label_path = self.dm.review_labels / f"{sample_id}.txt"
         meta_path = self.dm.review_metadata / f"{sample_id}.json"
@@ -44,10 +54,10 @@ class AutoAnnotator:
         if not image_path.exists():
             return None
 
-        results = self.model(image_path, verbose=False)[0]
+        results = self.model(image_path, conf=min_confidence, verbose=False)[0]
         boxes = results.boxes
 
-        best_conf = 0.0
+        confidences = []
         label_lines = []
 
         if boxes is not None and len(boxes) > 0:
@@ -55,13 +65,28 @@ class AutoAnnotator:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
                 x, y, w, h = box.xywhn[0].tolist()
-                best_conf = max(best_conf, conf)
+                confidences.append(conf)
                 label_lines.append(f"{cls_id} {x} {y} {w} {h}")
 
-        # Label in-place ueberschreiben (gleiche sample_id wie beim Extrahieren)
-        label_path.write_text("\n".join(label_lines))
+        if not label_lines:
+            # Nichts erkannt: kein Trainingswert, nicht in die Review Queue
+            for p in (image_path, label_path, meta_path):
+                p.unlink(missing_ok=True)
+            return {
+                "sample_id": sample_id,
+                "confidence": 0.0,
+                "max_confidence": 0.0,
+                "outcome": "discarded",
+                "needs_review": False,
+                "label_count": 0,
+                "split": None,
+            }
 
-        needs_review = (not label_lines) or (best_conf < self.confidence_threshold)
+        min_conf = min(confidences)
+        max_conf = max(confidences)
+        outcome = "auto" if min_conf >= auto_threshold else "review"
+
+        label_path.write_text("\n".join(label_lines))
 
         # Metadata laden (wurde vom FrameExtractor bereits angelegt) und updaten
         if meta_path.exists():
@@ -70,17 +95,17 @@ class AutoAnnotator:
         else:
             meta_data = {"sample_id": sample_id}
 
-        meta_data["confidence"] = best_conf
+        meta_data["confidence"] = min_conf
+        meta_data["max_confidence"] = max_conf
         meta_data["model_version"] = model_version
-        meta_data["reviewed"] = not needs_review
-        meta_data["accepted"] = not needs_review
+        meta_data["reviewed"] = outcome == "auto"
+        meta_data["accepted"] = outcome == "auto"
 
-        if not needs_review:
-            # Hohe Konfidenz -> direkt ins Trainingsset verschieben
-            img_dst = self.dm.train_images / image_path.name
-            label_dst = self.dm.train_labels / label_path.name
-            image_path.rename(img_dst)
-            label_path.rename(label_dst)
+        split = None
+        if outcome == "auto":
+            # Hohe Konfidenz -> direkt ins Trainingsset (inkl. val-Anteil)
+            img_dst, label_dst = self.dm.route_promoted_sample(image_path, label_path)
+            split = "val" if img_dst.parent == self.dm.val_images else "train"
             meta_data["image_path"] = str(img_dst)
             meta_data["label_path"] = str(label_dst)
 
@@ -89,7 +114,10 @@ class AutoAnnotator:
 
         return {
             "sample_id": sample_id,
-            "confidence": best_conf,
-            "needs_review": needs_review,
+            "confidence": min_conf,
+            "max_confidence": max_conf,
+            "outcome": outcome,
+            "needs_review": outcome == "review",
             "label_count": len(label_lines),
+            "split": split,
         }

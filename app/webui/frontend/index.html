@@ -49,8 +49,10 @@
   <section class="panel actions-panel">
     <div class="panel-header"><h2>Aktionen</h2></div>
     <div class="action-buttons">
+      <!-- Schneiden-Buttons ausgeblendet (nur noch FCPXML-Export)
       <button id="startBtn" class="btn btn-primary">▶ Start (nur schneiden)</button>
       <button id="mlPipelineBtn" class="btn btn-success">🚀 Process + ML Pipeline</button>
+      -->
       <button id="mlPipelineFcpxmlBtn" class="btn btn-success">🚀 ML Pipeline + FCPXML (ohne Schneiden)</button>
       <button id="exportFcpxmlBtn" class="btn btn-outline">🎬 FCPXML-Timeline exportieren</button>
       <button id="trainBtn" class="btn btn-info">🧠 Train Model</button>
@@ -67,6 +69,13 @@
       <div class="progress-bar"><div id="subProgress" class="progress-fill"></div></div>
     </div>
     <div class="status-line" id="statusLine">Bereit</div>
+  </section>
+
+  <section class="panel report-panel hidden" id="mlReportPanel">
+    <div class="panel-header"><h2>ML-Bericht (letzter Lauf)</h2></div>
+    <table class="report-table"><tbody id="mlReportRows"></tbody></table>
+    <div class="report-subtitle">Verteilung nach Konfidenz (schwächste Box je Bild)</div>
+    <table class="report-table"><tbody id="mlReportBuckets"></tbody></table>
   </section>
 
   <section class="panel log-panel">

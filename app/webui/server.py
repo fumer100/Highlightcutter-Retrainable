@@ -86,6 +86,12 @@ SETTINGS_SCHEMA = [
     ("enable_speech_to_text", "Speech-to-Text aktiv", "bool", "Audiospur transkribieren, damit das LLM Humor/Kommentare mitbewerten kann"),
     ("whisper_model_size", "Whisper-Modellgroesse", "choice", "Groesser = genauer aber langsamer (tiny/base/small/medium/large-v3)"),
     ("whisper_language", "Whisper-Sprache (leer = Auto)", "text", "Sprachcode wie 'de' oder 'en', leer lassen fuer automatische Erkennung"),
+    ("ml_auto_train_threshold", "ML: Auto-Training ab Konfidenz", "float", "Bilder, bei denen auch die SCHWAECHSTE Box mindestens so sicher ist, gehen ohne Review direkt ins Training (0.0-1.0)"),
+    ("ml_review_min_confidence", "ML: Review ab Konfidenz", "float", "Zwischen diesem Wert und der Auto-Training-Schwelle landet ein Bild in der Review Queue, darunter (nichts erkannt) wird es verworfen"),
+    ("ml_max_review_per_video", "ML: Max. Review-Bilder pro Video", "int", "Begrenzt die Review Queue pro Video auf die unsichersten Bilder (0 = unbegrenzt)"),
+    ("ml_event_group_gap_sec", "ML: Event-Zusammenfassung (s)", "float", "Erkennungen mit kleinerem zeitlichen Abstand gelten als ein Event"),
+    ("ml_frames_per_event", "ML: Frames pro Event", "int", "Wie viele Frames pro Event extrahiert werden"),
+    ("ml_duplicate_threshold", "ML: Duplikat-Schwelle", "float", "Frames, die einem schon gespeicherten Frame so aehnlich sind (mittlere Grauwert-Abweichung 0-255), werden uebersprungen"),
 ]
 
 CHOICE_OPTIONS = {
@@ -93,6 +99,51 @@ CHOICE_OPTIONS = {
     "llm_provider": ["ollama", "openai"],
     "whisper_model_size": ["tiny", "base", "small", "medium", "large-v3"],
 }
+
+
+_ML_SUM_KEYS = ("events", "groups", "duplicates", "candidates", "auto_train", "auto_val",
+                "review", "review_capped", "discarded")
+
+
+def _new_ml_totals() -> dict:
+    totals = {k: 0 for k in _ML_SUM_KEYS}
+    totals["conf_buckets"] = {}
+    return totals
+
+
+def _add_ml_stats(totals: dict, stats: dict):
+    for k in _ML_SUM_KEYS:
+        totals[k] += stats.get(k, 0)
+    for label, n in stats.get("conf_buckets", {}).items():
+        totals["conf_buckets"][label] = totals["conf_buckets"].get(label, 0) + n
+
+
+def _build_ml_report(totals: dict, cfg: Config) -> dict:
+    auto = totals["auto_train"] + totals["auto_val"]
+    rows = [
+        ("Erkennungen im Video", totals["events"], "YOLO-Treffer auf den geprueften Frames"),
+        ("Zusammengefasste Events", totals["groups"], f"Treffer < {cfg.ml_event_group_gap_sec:g}s Abstand = 1 Event"),
+        ("Duplikate uebersprungen", totals["duplicates"], "fast identische Frames"),
+        ("Frames vorgelabelt", totals["candidates"], "gespeicherte Kandidaten"),
+        ("Auto -> Training", auto,
+         f"schwaechste Box >= {cfg.ml_auto_train_threshold:.2f} (davon {totals['auto_val']} in val)"),
+        ("Zur Review", totals["review"],
+         f"Konfidenz {cfg.ml_review_min_confidence:.2f}-{cfg.ml_auto_train_threshold:.2f}"),
+        ("Review-Limit gekappt", totals["review_capped"],
+         f"mehr als {cfg.ml_max_review_per_video} pro Video, am wenigsten unsichere entfernt"),
+        ("Verworfen", totals["discarded"], f"nichts >= {cfg.ml_review_min_confidence:.2f} erkannt"),
+    ]
+    buckets = [{"label": k, "count": v} for k, v in totals["conf_buckets"].items()]
+
+    lines = ["===== ML-Bericht ====="]
+    lines += [f"{label:<28}{value:>6}   ({hint})" for label, value, hint in rows]
+    lines.append("Verteilung nach Konfidenz (schwaechste Box):")
+    lines += [f"  {b['label']}: {b['count']}" for b in buckets]
+    return {
+        "rows": [{"label": l, "value": v, "hint": h} for l, v, h in rows],
+        "buckets": buckets,
+        "text": "\n".join(lines),
+    }
 
 
 class _LogStream:
@@ -403,19 +454,20 @@ class Core:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             self._sync_model_path()
             total = len(video_paths)
-            total_extracted = total_annotated = total_needs_review = 0
+            totals = _new_ml_totals()
             total_clips = 0
 
             for idx, video in enumerate(video_paths, start=1):
                 if cancel_event.is_set():
                     raise RuntimeError("Vorgang abgebrochen.")
 
-                self._push("status", f"ML-Pipeline: {os.path.basename(video)}")
+                self._push("status", f"Analyse {idx}/{total}: {os.path.basename(video)}")
                 base = os.path.splitext(os.path.basename(video))[0]
+                progress_cb = lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct})
                 analysis_kwargs = dict(
                     video_path=video,
                     cfg=self.cfg,
-                    progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
+                    progress_callback=progress_cb,
                     cancel_event=cancel_event,
                     game_name=self.current_game,
                     game_context=self._dm().game.llm_context,
@@ -433,18 +485,31 @@ class Core:
                         **analysis_kwargs,
                     )
 
-                stats = self._pc().run_full_cycle(video_path=video, events=result["yolo_event_times"])
-                total_extracted += stats["extracted"]
-                total_annotated += stats["annotated"]
-                total_needs_review += stats["needs_review"]
+                stats = self._pc().run_full_cycle(
+                    video_path=video,
+                    events=result["yolo_event_times"],
+                    event_group_gap_sec=self.cfg.ml_event_group_gap_sec,
+                    frames_per_event=self.cfg.ml_frames_per_event,
+                    duplicate_threshold=self.cfg.ml_duplicate_threshold,
+                    auto_threshold=self.cfg.ml_auto_train_threshold,
+                    review_min_confidence=self.cfg.ml_review_min_confidence,
+                    max_review_per_video=self.cfg.ml_max_review_per_video,
+                    progress_callback=progress_cb,
+                    status_callback=lambda text: self._push("status", text),
+                    cancel_event=cancel_event,
+                )
+                _add_ml_stats(totals, stats)
                 self._push("overallProgress", {"idx": idx, "total": total})
 
+            report = _build_ml_report(totals, self.cfg)
+            print("\n" + report["text"])
+            self._push("mlReport", report)
             self._push("reviewCount", self._review_count())
             self._push("status", "ML-Pipeline fertig")
             message = (
-                f"{total_extracted} Frames extrahiert\n"
-                f"{total_annotated} automatisch annotiert\n"
-                f"{total_needs_review} Frames benoetigen manuelle Korrektur"
+                f"ML-Pipeline fertig: {totals['auto_train'] + totals['auto_val']} automatisch ins Training, "
+                f"{totals['review']} zur Review, {totals['discarded']} verworfen "
+                f"(Details im ML-Bericht)."
             )
             if export_fcpxml:
                 message += f"\n{total_clips} Clips als FCPXML exportiert (KEIN Video geschnitten)"

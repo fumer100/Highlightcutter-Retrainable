@@ -236,6 +236,13 @@ select {
 }
 .status-line { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
 
+.report-panel.hidden { display: none; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.report-table td { padding: 3px 8px; border-bottom: 1px solid var(--panel-border); }
+.report-table td.num { text-align: right; font-weight: 600; width: 70px; }
+.report-table td.hint { color: var(--text-dim); font-size: 12px; }
+.report-subtitle { font-size: 12px; color: var(--text-dim); margin: 12px 0 4px; }
+
 /* ---------------- Log ---------------- */
 
 .log-console {

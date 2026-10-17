@@ -28,6 +28,8 @@ class SampleMetadata:
 
     source_clip: str = ""
 
+    timestamp_sec: float = 0.0
+
 
     def save(self, output_file: Path):
 

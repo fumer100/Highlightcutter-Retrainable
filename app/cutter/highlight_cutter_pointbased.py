@@ -166,6 +166,14 @@ class Config:
     whisper_model_size: str = "small"  # tiny|base|small|medium|large-v3
     whisper_language: str | None = None  # None = Auto-Erkennung
 
+    # --- ML-Pipeline (Frame-Extraktion + Vorlabeln fuer Retraining) ---
+    ml_event_group_gap_sec: float = 0.5  # Erkennungen mit kleinerem Abstand zaehlen als EIN Event
+    ml_frames_per_event: int = 1  # wie viele Frames pro Event gespeichert werden
+    ml_duplicate_threshold: float = 3.0  # Frames mit kleinerer Grauwert-Abweichung (0-255) zu einem schon gespeicherten gelten als Duplikat
+    ml_auto_train_threshold: float = 0.85  # ab dieser Konfidenz (schwaechste Box!) automatisch ins Training
+    ml_review_min_confidence: float = 0.25  # darunter wird verworfen, dazwischen Review Queue
+    ml_max_review_per_video: int = 30  # max. Review-Bilder pro Video (0 = unbegrenzt)
+
 
 def fmt_time(sec: float) -> str:
     """Formatiert Sekunden als MM:SS.ss (Sek)."""
