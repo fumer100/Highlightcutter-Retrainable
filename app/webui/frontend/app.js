@@ -66,6 +66,7 @@ function applyState(s) {
   state.firstModelMinLabeled = s.firstModelMinLabeled || 20;
   renderGameDropdown();
   renderSettings(s.settingsSchema);
+  updateSettingsHeader(s.settingsCustomized);
   updateReviewBadge(s.reviewCount);
   renderBootstrapBanner();
   updateActionButtons();
@@ -142,7 +143,7 @@ function bindEvents() {
   document.getElementById("gameDropdown").addEventListener("change", async (e) => {
     const res = await apiPost("/api/select_game", { name: e.target.value });
     if (res.ok) applyState(res.state);
-    else showToast(res.error, "error");
+    else { showToast(res.error, "error"); renderGameDropdown(); }
   });
 
   document.getElementById("refreshGamesBtn").addEventListener("click", async () => {
@@ -240,13 +241,19 @@ function bindEvents() {
   document.getElementById("applySettingsBtn").addEventListener("click", async () => {
     const values = collectSettingsValues();
     const res = await apiPost("/api/apply_settings", values);
-    if (res.ok) showToast("Einstellungen übernommen.", "success");
+    if (res.ok) {
+      updateSettingsHeader(res.customized);
+      showToast(`Einstellungen für '${res.game}' gespeichert.`, "success");
+    } else if (res.error) showToast(res.error, "error");
     else showToast("Ungültige Felder: " + res.errors.join(", "), "error");
   });
 
   document.getElementById("resetSettingsBtn").addEventListener("click", async () => {
     const res = await apiPost("/api/reset_settings");
+    if (!res.ok) { showToast(res.error, "error"); return; }
     renderSettings(res.settingsSchema);
+    updateSettingsHeader(false);
+    showToast(`Einstellungen für '${state.currentGame}' auf Standard zurückgesetzt.`, "success");
   });
 
   // Schneiden-Buttons (aktuell ausgeblendet, siehe index.html)
@@ -642,6 +649,12 @@ function renderVideoList() {
 // Einstellungen
 // ------------------------------------------------------------
 
+function updateSettingsHeader(customized) {
+  document.getElementById("settingsGameLabel").textContent = state.currentGame
+    ? ` – ${state.currentGame}${customized ? " (angepasst)" : " (Standard)"}`
+    : "";
+}
+
 function renderSettings(schema) {
   const body = document.getElementById("settingsBody");
   body.innerHTML = "";
@@ -682,7 +695,7 @@ function renderSettings(schema) {
     row.appendChild(input);
 
     const desc = document.createElement("small");
-    desc.textContent = item.desc;
+    desc.textContent = item.global ? `${item.desc} [gilt für alle Spiele]` : item.desc;
     row.appendChild(desc);
 
     body.appendChild(row);

@@ -42,6 +42,7 @@ from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
 from app.training.trainer import Trainer
 from app.training.training_history import append_history, build_training_overview, compute_dataset_snapshot
+from config.game_settings import get_game_settings, pop_game_settings, save_game_settings
 from config.games import (
     GAMES,
     GAMES_CONFIG_FILE,
@@ -102,6 +103,12 @@ SETTINGS_SCHEMA = [
     ("ml_frames_per_event", "ML: Frames pro Event", "int", "Wie viele Frames pro Event extrahiert werden"),
     ("ml_duplicate_threshold", "ML: Duplikat-Schwelle", "float", "Frames, die einem schon gespeicherten Frame so aehnlich sind (mittlere Grauwert-Abweichung 0-255), werden uebersprungen"),
 ]
+
+# Rechner-/Dienst-bezogen und daher fuer ALLE Spiele gleich (nicht pro Spiel gespeichert)
+GLOBAL_SETTINGS = {
+    "use_gpu_encoding", "nvenc_cq", "crf", "max_parallel_cuts",
+    "llm_provider", "llm_model", "ollama_base_url", "llm_batch_size", "whisper_model_size",
+}
 
 CHOICE_OPTIONS = {
     "scoring_mode": ["legacy", "llm"],
@@ -190,6 +197,7 @@ class Core:
     def __init__(self):
         self.current_game = next(iter(GAMES), None)
         self.cfg = Config(yolo_model_path=None)
+        self._load_game_cfg(self.current_game)
         self._dataset_managers = {}
         self._pipeline_controllers = {}
         self._review_images: list[Path] = []
@@ -271,17 +279,24 @@ class Core:
             "datasetStats": dataset_stats,
             "firstModelMinLabeled": FIRST_MODEL_MIN_LABELED,
             "reviewCount": review_count,
-            "settingsSchema": [
-                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
-                 "options": CHOICE_OPTIONS.get(a)}
-                for (a, l, t, d) in SETTINGS_SCHEMA
-            ],
+            "settingsCustomized": bool(self.current_game and get_game_settings(self.current_game)),
+            "settingsSchema": self._settings_schema(),
         }
+
+    def _settings_schema(self):
+        return [
+            {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
+             "options": CHOICE_OPTIONS.get(a), "global": a in GLOBAL_SETTINGS}
+            for (a, l, t, d) in SETTINGS_SCHEMA
+        ]
 
     def select_game(self, name: str):
         if name not in GAMES:
             return {"ok": False, "error": f"Unbekanntes Spiel: {name}"}
+        if self.cancel_event is not None and name != self.current_game:
+            return {"ok": False, "error": "Waehrend eines laufenden Vorgangs kann das Spiel nicht gewechselt werden."}
         self.current_game = name
+        self._load_game_cfg(name)
         return {"ok": True, "state": self.get_state()}
 
     def refresh_games(self):
@@ -294,45 +309,83 @@ class Core:
         self._pipeline_controllers.clear()
         if self.current_game not in GAMES:
             self.current_game = next(iter(GAMES), None)
+        self._load_game_cfg(self.current_game)
         return {"ok": True, "state": self.get_state()}
 
     # ------------------------------------------------------------
-    # Einstellungen
+    # Einstellungen (pro Spiel gespeichert, siehe config/game_settings.py)
     # ------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_setting(attr: str, typ: str, raw):
+        if typ == "bool":
+            return bool(raw)
+        if typ == "int":
+            return int(raw)
+        if typ == "float":
+            value = float(raw)
+            if value != value or value in (float("inf"), float("-inf")):
+                raise ValueError("keine endliche Zahl")
+            return value
+        text = str(raw).strip()  # "text" | "choice"
+        return (text or None) if attr == "whisper_language" else text
+
+    def _load_game_cfg(self, name):
+        """Setzt die spielbezogenen Einstellungen auf Standard + gespeicherte Werte des Spiels."""
+        defaults = Config()
+        saved = get_game_settings(name) if name else {}
+        for attr, _label, typ, _desc in SETTINGS_SCHEMA:
+            if attr in GLOBAL_SETTINGS:
+                continue
+            value = getattr(defaults, attr)
+            if attr in saved:
+                try:
+                    value = self._coerce_setting(attr, typ, saved[attr])
+                except (ValueError, TypeError):
+                    pass
+            setattr(self.cfg, attr, value)
+
+    def _persist_game_cfg(self, name):
+        """Speichert nur die vom Standard abweichenden spielbezogenen Werte."""
+        defaults = Config()
+        diff = {}
+        for attr, _label, _typ, _desc in SETTINGS_SCHEMA:
+            if attr in GLOBAL_SETTINGS:
+                continue
+            if getattr(self.cfg, attr) != getattr(defaults, attr):
+                diff[attr] = getattr(self.cfg, attr)
+        save_game_settings(name, diff)
+        return bool(diff)
 
     def apply_settings(self, values: dict):
         errors = []
         for attr, _label, typ, _desc in SETTINGS_SCHEMA:
             if attr not in values:
                 continue
-            raw = values[attr]
             try:
-                if typ == "bool":
-                    setattr(self.cfg, attr, bool(raw))
-                elif typ == "int":
-                    setattr(self.cfg, attr, int(raw))
-                elif typ == "float":
-                    setattr(self.cfg, attr, float(raw))
-                else:  # "text" | "choice"
-                    text = str(raw).strip()
-                    setattr(self.cfg, attr, (text or None) if attr == "whisper_language" else text)
+                setattr(self.cfg, attr, self._coerce_setting(attr, typ, values[attr]))
             except (ValueError, TypeError):
                 errors.append(attr)
 
-        return {"ok": not errors, "errors": errors}
+        customized = False
+        if self.current_game:
+            try:
+                customized = self._persist_game_cfg(self.current_game)
+            except OSError as e:
+                return {"ok": False, "errors": [], "error": f"Einstellungen konnten nicht gespeichert werden: {e}"}
+
+        return {"ok": not errors, "errors": errors, "game": self.current_game, "customized": customized}
 
     def reset_settings(self):
         defaults = Config()
         for attr, _label, _typ, _desc in SETTINGS_SCHEMA:
             setattr(self.cfg, attr, getattr(defaults, attr))
-        return {
-            "ok": True,
-            "settingsSchema": [
-                {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
-                 "options": CHOICE_OPTIONS.get(a)}
-                for (a, l, t, d) in SETTINGS_SCHEMA
-            ],
-        }
+        if self.current_game:
+            try:
+                save_game_settings(self.current_game, {})
+            except OSError as e:
+                return {"ok": False, "error": f"Einstellungen konnten nicht zurueckgesetzt werden: {e}"}
+        return {"ok": True, "settingsSchema": self._settings_schema(), "customized": False}
 
     # ------------------------------------------------------------
     # Server-seitiger Datei-Browser (Ersatz fuer native Dialoge)
@@ -451,6 +504,7 @@ class Core:
             return {"ok": False, "error": str(e)}
 
         self.current_game = name
+        self._load_game_cfg(name)
         if video_paths:
             self.cancel_event = threading.Event()
             threading.Thread(
@@ -541,10 +595,19 @@ class Core:
             except OSError as e:
                 problems.append(f"{label}: {e}")
 
+        removed_settings = pop_game_settings(name)
+        if removed_settings:
+            trash.mkdir(parents=True, exist_ok=True)
+            (trash / "game_settings.json").write_text(
+                json.dumps(removed_settings, indent=2, ensure_ascii=False), encoding="utf-8")
+            if "settings" not in moved:
+                moved.append("settings")
+
         self._dataset_managers.pop(name, None)
         self._pipeline_controllers.pop(name, None)
         if self.current_game == name or self.current_game not in GAMES:
             self.current_game = next(iter(GAMES), None)
+            self._load_game_cfg(self.current_game)
 
         return {
             "ok": True,
