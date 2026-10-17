@@ -17,6 +17,8 @@
     <select id="gameDropdown"></select>
     <button id="refreshGamesBtn" class="icon-btn" title="Spiele neu laden">🔄</button>
     <button id="addGameBtn" class="btn btn-outline">➕ Spiel hinzufügen</button>
+    <button id="editGameBtn" class="btn btn-outline">✏️ Spiel bearbeiten</button>
+    <button id="deleteGameBtn" class="btn btn-outline btn-danger-outline">🗑 Spiel löschen</button>
   </div>
 </header>
 
@@ -214,6 +216,37 @@
         <button id="testAgainBtn" class="btn btn-outline">Neuer Test</button>
         <button id="closeTestResultBtn" class="btn btn-outline">Schließen</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="editGameModal" class="modal hidden">
+  <div class="modal-content">
+    <h2 id="editGameTitle">Spiel bearbeiten</h2>
+    <div class="form-row info-row" id="editGameInfo"></div>
+    <div class="form-row">
+      <label>Klassen (kommagetrennt, Reihenfolge = Klassen-Nummer)</label>
+      <input type="text" id="editGameClasses">
+      <small id="editGameHint"></small>
+    </div>
+    <div class="modal-actions">
+      <button id="saveEditGameBtn" class="btn btn-primary">Speichern</button>
+      <button id="cancelEditGameBtn" class="btn btn-outline">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<div id="deleteGameModal" class="modal hidden">
+  <div class="modal-content">
+    <h2>⚠️ Spiel wirklich löschen?</h2>
+    <div class="form-row info-row" id="deleteGameInfo"></div>
+    <div class="form-row">
+      <label id="deleteGameConfirmLabel"></label>
+      <input type="text" id="deleteGameConfirmInput" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button id="confirmDeleteGameBtn" class="btn btn-danger" disabled>Ja, Spiel löschen</button>
+      <button id="cancelDeleteGameBtn" class="btn btn-outline">Abbrechen</button>
     </div>
   </div>
 </div>

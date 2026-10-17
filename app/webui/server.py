@@ -437,6 +437,141 @@ class Core:
             ).start()
         return {"ok": True, "state": self.get_state(), "bootstrap": bool(video_paths)}
 
+    # ------------------------------------------------------------
+    # Spiel bearbeiten / loeschen
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _game_dirs(game) -> dict:
+        return {
+            "models": game.model_path.parent,
+            "datasets": game.dataset_path,
+            "review_queue": game.review_queue_path,
+        }
+
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file()) if path.is_dir() else 0
+
+    def get_game_info(self, name: str):
+        if name not in GAMES:
+            return {"ok": False, "error": f"Unbekanntes Spiel: {name}"}
+        game = GAMES[name]
+        dm = self._dm_for(name)
+        stats = dm.labeled_stats()
+        size_mb = sum(self._dir_size(p) for p in self._game_dirs(game).values()) / (1024 * 1024)
+        return {
+            "ok": True,
+            "name": name,
+            "classes": game.classes,
+            "hasModel": game.model_path.is_file(),
+            "train": stats["train"],
+            "val": stats["val"],
+            "withBoxes": stats["with_boxes"],
+            "review": stats["review"],
+            "sizeMb": round(size_mb, 1),
+            "isLast": len(GAMES) <= 1,
+            # Klassen duerfen nur erweitert werden, sobald Modell oder Labels existieren
+            "classesLocked": game.model_path.is_file() or stats["with_boxes"] > 0,
+        }
+
+    def delete_game(self, name: str, confirm_name: str):
+        """
+        Entfernt ein Spiel aus der Liste. Modell, Datensatz und Review Queue werden NICHT
+        sofort geloescht, sondern nach _deleted_games/<Spiel>_<Zeitstempel>/ verschoben.
+        """
+        if name not in GAMES:
+            return {"ok": False, "error": f"Unbekanntes Spiel: {name}"}
+        if (confirm_name or "").strip() != name:
+            return {"ok": False, "error": "Der eingegebene Spielname stimmt nicht ueberein."}
+        if self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft gerade ein Vorgang. Bitte abwarten oder abbrechen."}
+        if len(GAMES) <= 1:
+            return {"ok": False, "error": "Das letzte Spiel kann nicht geloescht werden."}
+
+        game = GAMES[name]
+        dirs = self._game_dirs(game)
+
+        try:
+            with open(GAMES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            raw.get("games", {}).pop(name, None)
+            with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(raw, f, indent=2, ensure_ascii=False)
+            reload_games()
+        except (OSError, ValueError, GamesConfigError) as e:
+            return {"ok": False, "error": str(e)}
+
+        trash = PROJECT_ROOT / "_deleted_games" / f"{name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        moved, problems = [], []
+        for label, src in dirs.items():
+            try:
+                src_resolved = src.resolve()
+                if not src_resolved.is_dir():
+                    continue
+                if PROJECT_ROOT.resolve() not in src_resolved.parents:
+                    problems.append(f"{label}: Ordner liegt ausserhalb des Projekts und wurde nicht angefasst")
+                    continue
+                trash.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src_resolved), str(trash / label))
+                moved.append(label)
+            except OSError as e:
+                problems.append(f"{label}: {e}")
+
+        self._dataset_managers.pop(name, None)
+        self._pipeline_controllers.pop(name, None)
+        if self.current_game == name or self.current_game not in GAMES:
+            self.current_game = next(iter(GAMES), None)
+
+        return {
+            "ok": True,
+            "state": self.get_state(),
+            "trashDir": str(trash) if moved else None,
+            "problems": problems,
+        }
+
+    def edit_game(self, name: str, classes: list):
+        if name not in GAMES:
+            return {"ok": False, "error": f"Unbekanntes Spiel: {name}"}
+        if self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft gerade ein Vorgang."}
+
+        classes = [c.strip() for c in (classes or []) if c and c.strip()]
+        if not classes:
+            return {"ok": False, "error": "Bitte mindestens eine Klasse angeben."}
+        if len(classes) != len(set(classes)):
+            return {"ok": False, "error": "Doppelte Klassennamen gefunden."}
+
+        info = self.get_game_info(name)
+        old = list(GAMES[name].classes)
+        if info["classesLocked"] and classes[:len(old)] != old:
+            return {
+                "ok": False,
+                "error": (
+                    "Dieses Spiel hat schon ein Modell bzw. gelabelte Bilder. Bestehende Klassen duerfen nicht "
+                    "umbenannt, umsortiert oder entfernt werden (die Klassen-Nummern in den Labels wuerden "
+                    "sonst nicht mehr passen). Neue Klassen koennen nur am Ende ergaenzt werden."
+                ),
+            }
+
+        try:
+            with open(GAMES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            entry = raw["games"][name]
+            entry["classes"] = classes
+            if entry.get("event_classes") is not None:
+                # Spiele mit eigenen Event-Klassen (neu angelegt): alle Klassen bleiben Event-Klassen
+                entry["event_classes"] = list(classes)
+            with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(raw, f, indent=2, ensure_ascii=False)
+            reload_games()
+        except (OSError, ValueError, KeyError, GamesConfigError) as e:
+            return {"ok": False, "error": str(e)}
+
+        self._dataset_managers.pop(name, None)
+        self._pipeline_controllers.pop(name, None)
+        return {"ok": True, "state": self.get_state()}
+
     def _bootstrap_worker(self, game_name, video_paths, cancel_event):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
@@ -962,6 +1097,23 @@ def api_add_game():
     return jsonify(core.add_game(
         data.get("name"), data.get("modelPath"), data.get("classes"), data.get("videoPaths"),
     ))
+
+
+@app.route("/api/game_info")
+def api_game_info():
+    return jsonify(core.get_game_info(request.args.get("name", "")))
+
+
+@app.route("/api/delete_game", methods=["POST"])
+def api_delete_game():
+    d = request.get_json(force=True)
+    return jsonify(core.delete_game(d.get("name"), d.get("confirmName")))
+
+
+@app.route("/api/edit_game", methods=["POST"])
+def api_edit_game():
+    d = request.get_json(force=True)
+    return jsonify(core.edit_game(d.get("name"), d.get("classes")))
 
 
 @app.route("/api/start_processing", methods=["POST"])

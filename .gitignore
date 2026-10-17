@@ -9,5 +9,6 @@ data/labels/
 *.pt
 *.onnx
 model_tests/
+_deleted_games/
 *.pyc
 *.txt

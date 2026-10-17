@@ -98,6 +98,8 @@ select {
 .btn-primary { background: var(--accent); }
 .btn-success { background: var(--success); color: #06210f; }
 .btn-danger  { background: var(--danger); }
+.btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-danger-outline:hover { border-color: var(--danger); color: var(--danger); }
 .btn-warning { background: var(--warning); color: #2a1a00; }
 .btn-info    { background: var(--info); }
 

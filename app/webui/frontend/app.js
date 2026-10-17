@@ -156,6 +156,15 @@ function bindEvents() {
   });
 
   document.getElementById("addGameBtn").addEventListener("click", openAddGameModal);
+  document.getElementById("editGameBtn").addEventListener("click", openEditGameModal);
+  document.getElementById("cancelEditGameBtn").addEventListener("click", closeEditGameModal);
+  document.getElementById("saveEditGameBtn").addEventListener("click", saveEditGame);
+  document.getElementById("deleteGameBtn").addEventListener("click", openDeleteGameModal);
+  document.getElementById("cancelDeleteGameBtn").addEventListener("click", closeDeleteGameModal);
+  document.getElementById("deleteGameConfirmInput").addEventListener("input", (e) => {
+    document.getElementById("confirmDeleteGameBtn").disabled = e.target.value.trim() !== state.deleteTarget;
+  });
+  document.getElementById("confirmDeleteGameBtn").addEventListener("click", confirmDeleteGame);
   document.getElementById("cancelGameBtn").addEventListener("click", closeAddGameModal);
 
   document.getElementById("browseModelBtn").addEventListener("click", async () => {
@@ -369,6 +378,84 @@ function updateReviewBadge(count) {
 // ------------------------------------------------------------
 // Add-Game-Modal
 // ------------------------------------------------------------
+
+async function openEditGameModal() {
+  if (!state.currentGame) return;
+  const info = await apiGet(`/api/game_info?name=${encodeURIComponent(state.currentGame)}`);
+  if (!info.ok) { showToast(info.error, "error"); return; }
+  state.editTarget = info.name;
+  document.getElementById("editGameTitle").textContent = `Spiel bearbeiten – ${info.name}`;
+  document.getElementById("editGameInfo").textContent =
+    `Modell: ${info.hasModel ? "vorhanden" : "noch keins"}\n` +
+    `Bilder: ${info.train} train, ${info.val} val, ${info.review} in der Review Queue`;
+  document.getElementById("editGameClasses").value = info.classes.join(", ");
+  document.getElementById("editGameHint").textContent = info.classesLocked
+    ? "Es gibt schon ein Modell bzw. gelabelte Bilder: Bestehende Klassen können nicht umbenannt, umsortiert " +
+      "oder entfernt werden. Neue Klassen nur am Ende ergänzen (z.B. „..., neue_klasse“)."
+    : "Noch keine Labels und kein Modell: Klassen können frei geändert werden.";
+  document.getElementById("editGameModal").classList.remove("hidden");
+}
+
+function closeEditGameModal() {
+  document.getElementById("editGameModal").classList.add("hidden");
+}
+
+async function saveEditGame() {
+  const classes = document.getElementById("editGameClasses").value
+    .split(",").map((c) => c.trim()).filter(Boolean);
+  const res = await apiPost("/api/edit_game", { name: state.editTarget, classes });
+  if (res.ok) {
+    applyState(res.state);
+    closeEditGameModal();
+    showToast(`Spiel '${state.editTarget}' wurde aktualisiert.`, "success");
+  } else {
+    showToast(res.error, "error");
+  }
+}
+
+async function openDeleteGameModal() {
+  if (!state.currentGame) return;
+  const info = await apiGet(`/api/game_info?name=${encodeURIComponent(state.currentGame)}`);
+  if (!info.ok) { showToast(info.error, "error"); return; }
+  if (info.isLast) { showToast("Das letzte Spiel kann nicht gelöscht werden.", "warn"); return; }
+
+  state.deleteTarget = info.name;
+  document.getElementById("deleteGameInfo").textContent =
+    `Spiel: ${info.name}\n` +
+    `Modell: ${info.hasModel ? "vorhanden" : "keins"}\n` +
+    `Datensatz: ${info.train} Trainings- und ${info.val} Validierungsbilder\n` +
+    `Review Queue: ${info.review} Bilder\n` +
+    `Speicherplatz: ca. ${info.sizeMb} MB\n\n` +
+    `Das Spiel verschwindet aus der Liste. Modell, Datensatz und Review Queue werden in den Ordner ` +
+    `„_deleted_games“ im Projekt verschoben (nicht sofort unwiderruflich gelöscht).`;
+  document.getElementById("deleteGameConfirmLabel").textContent =
+    `Zur Bestätigung den Spielnamen eingeben: ${info.name}`;
+  const input = document.getElementById("deleteGameConfirmInput");
+  input.value = "";
+  document.getElementById("confirmDeleteGameBtn").disabled = true;
+  document.getElementById("deleteGameModal").classList.remove("hidden");
+  input.focus();
+}
+
+function closeDeleteGameModal() {
+  document.getElementById("deleteGameModal").classList.add("hidden");
+}
+
+async function confirmDeleteGame() {
+  const name = state.deleteTarget;
+  const res = await apiPost("/api/delete_game", {
+    name,
+    confirmName: document.getElementById("deleteGameConfirmInput").value.trim(),
+  });
+  if (!res.ok) { showToast(res.error, "error"); return; }
+
+  closeDeleteGameModal();
+  applyState(res.state);
+  showToast(
+    `Spiel '${name}' gelöscht.` + (res.trashDir ? ` Dateien liegen in: ${res.trashDir}` : ""),
+    "success");
+  if (res.problems && res.problems.length) showToast(res.problems.join("; "), "warn");
+}
 
 function openAddGameModal() {
   document.getElementById("newGameName").value = "";
