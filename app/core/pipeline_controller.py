@@ -49,6 +49,8 @@ class PipelineController:
         auto_threshold: float = 0.85,
         review_min_confidence: float = 0.25,
         max_review_per_video: int = 30,
+        keep_empty: bool = False,
+        fill_to: int = 0,
         progress_callback=None,
         status_callback=None,
         cancel_event=None,
@@ -75,11 +77,13 @@ class PipelineController:
             "auto_val": 0,
             "review": 0,
             "review_capped": 0,
+            "review_empty": 0,
+            "filled": 0,
             "discarded": 0,
             "conf_buckets": {bucket_label(lo, hi): 0 for lo, hi in CONFIDENCE_BUCKETS},
         }
 
-        if not events:
+        if not events and not fill_to:
             print(f"[ML] Keine Events fuer {name}, ueberspringe Extraktion.")
             return self._finalize(stats)
 
@@ -88,7 +92,14 @@ class PipelineController:
         groups = group_events(events, event_group_gap_sec)
         timestamps = [t for g in groups for t in pick_group_timestamps(g, frames_per_event)]
         stats["groups"] = len(groups)
-        step(1, f"{len(events)} Erkennungen -> {len(groups)} Events, {len(timestamps)} Kandidaten-Frames")
+
+        # Fruehes Modell findet kaum Events: mit gleichmaessig verteilten Frames auffuellen
+        if fill_to > len(timestamps):
+            extra = self._uniform_timestamps(str(video_path), fill_to - len(timestamps), timestamps)
+            stats["filled"] = len(extra)
+            timestamps += extra
+        step(1, f"{len(events)} Erkennungen -> {len(groups)} Events, {stats['filled']} gleichmaessig ergaenzt, "
+                f"{len(timestamps)} Kandidaten-Frames")
 
         # 2/4: Frames extrahieren (ohne Duplikate)
         step(2, "Frames extrahieren")
@@ -106,7 +117,8 @@ class PipelineController:
 
         # 3/4: Vorlabeln und sortieren
         step(3, "Vorlabeln (" + (f"Auto-Training ab {auto_threshold:.2f}, " if auto_threshold <= 1.0 else "Auto-Training aus, ")
-                + f"Review ab {review_min_confidence:.2f}, darunter verwerfen)")
+                + f"Review ab {review_min_confidence:.2f}, "
+                + ("leere Frames kommen ungelabelt zur Review)" if keep_empty else "darunter verwerfen)"))
         review_samples = []
         for i, sample_id in enumerate(sample_ids, start=1):
             check_cancel()
@@ -115,11 +127,15 @@ class PipelineController:
                 model_version=model_version,
                 auto_threshold=auto_threshold,
                 min_confidence=review_min_confidence,
+                keep_empty=keep_empty,
             )
             if result is not None:
                 outcome = result["outcome"]
                 if outcome == "discarded":
                     stats["discarded"] += 1
+                elif outcome == "review" and result["label_count"] == 0:
+                    stats["review_empty"] += 1
+                    review_samples.append(result)
                 else:
                     self._count_bucket(stats, result["confidence"])
                     if outcome == "auto":
@@ -137,10 +153,27 @@ class PipelineController:
             for r in review_samples[max_review_per_video:]:
                 self._delete_sample(r["sample_id"])
                 stats["review_capped"] += 1
+                if r["label_count"] == 0:
+                    stats["review_empty"] -= 1
             review_samples = review_samples[:max_review_per_video]
         stats["review"] = len(review_samples)
 
         return self._finalize(stats)
+
+    @staticmethod
+    def _uniform_timestamps(video_path: str, count: int, existing: list[float], min_gap: float = 1.0) -> list[float]:
+        import cv2
+
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.release()
+        duration = frames / fps if fps > 0 else 0.0
+        if duration <= 0 or count <= 0:
+            return []
+
+        slots = [duration * (k + 0.5) / count for k in range(count)]
+        return [t for t in slots if all(abs(t - e) >= min_gap for e in existing)]
 
     def _count_bucket(self, stats: dict, conf: float):
         for lo, hi in CONFIDENCE_BUCKETS:

@@ -1,23 +1,24 @@
 [
   {
-    "timestamp": "2026-10-17 18:41:31",
+    "timestamp": "2026-10-17 19:16:42",
     "epochs": 60,
     "first_model": true,
     "snapshot": {
-      "train": 23,
+      "train": 24,
       "val": 3,
-      "total": 26,
-      "with_boxes": 24,
-      "boxes": 24,
+      "total": 27,
+      "with_boxes": 27,
+      "boxes": 27,
       "per_class": {
-        "Kill/Assist": 24
+        "Kill/Assist": 27
       },
       "images": [
+        "WARDOGS_00000003.jpg",
         "WARDOGS_00000005.jpg",
         "WARDOGS_00000007.jpg",
         "WARDOGS_00000010.jpg",
         "WARDOGS_00000012.jpg",
-        "WARDOGS_00000013.jpg",
+        "WARDOGS_00000014.jpg",
         "WARDOGS_00000019.jpg",
         "WARDOGS_00000021.jpg",
         "WARDOGS_00000026.jpg",
@@ -25,7 +26,7 @@
         "WARDOGS_00000029.jpg",
         "WARDOGS_00000031.jpg",
         "WARDOGS_00000033.jpg",
-        "WARDOGS_00000039.jpg",
+        "WARDOGS_00000042.jpg",
         "WARDOGS_00000043.jpg",
         "WARDOGS_00000046.jpg",
         "WARDOGS_00000050.jpg",
@@ -35,10 +36,10 @@
         "WARDOGS_00000071.jpg",
         "WARDOGS_00000074.jpg",
         "WARDOGS_00000077.jpg",
-        "WARDOGS_00000080.jpg",
-        "WARDOGS_00000014.jpg",
-        "WARDOGS_00000042.jpg",
-        "WARDOGS_00000083.jpg"
+        "WARDOGS_00000083.jpg",
+        "WARDOGS_00000013.jpg",
+        "WARDOGS_00000039.jpg",
+        "WARDOGS_00000080.jpg"
       ]
     }
   }

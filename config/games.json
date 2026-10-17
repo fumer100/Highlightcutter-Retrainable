@@ -33,7 +33,8 @@
       ],
       "event_classes": [
         "Kill/Assist"
-      ]
+      ],
+      "adaptive_thresholds": true
     }
   }
 }

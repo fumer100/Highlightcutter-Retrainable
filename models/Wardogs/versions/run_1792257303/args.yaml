@@ -13,7 +13,7 @@ cache: false
 device: '0'
 workers: 8
 project: D:\TurkishCowboy Video Editor\HighlichtCutter - Retrainable\models\Wardogs\versions
-name: run_1792255194
+name: run_1792257303
 exist_ok: false
 pretrained: true
 optimizer: auto
@@ -107,4 +107,4 @@ auto_augment: randaugment
 erasing: 0.4
 cfg: null
 tracker: botsort.yaml
-save_dir: D:\TurkishCowboy Video Editor\HighlichtCutter - Retrainable\models\Wardogs\versions\run_1792255194
+save_dir: D:\TurkishCowboy Video Editor\HighlichtCutter - Retrainable\models\Wardogs\versions\run_1792257303

@@ -43,6 +43,7 @@ class AutoAnnotator:
         model_version: str = "v1",
         auto_threshold: float | None = None,
         min_confidence: float | None = None,
+        keep_empty: bool = False,
     ):
         auto_threshold = self.confidence_threshold if auto_threshold is None else auto_threshold
         min_confidence = self.review_threshold if min_confidence is None else min_confidence
@@ -67,6 +68,18 @@ class AutoAnnotator:
                 x, y, w, h = box.xywhn[0].tolist()
                 confidences.append(conf)
                 label_lines.append(f"{cls_id} {x} {y} {w} {h}")
+
+        if not label_lines and keep_empty:
+            # Fruehes Modell erkennt noch nichts: Bild ungelabelt zur Review, damit der Nutzer selbst labelt
+            return {
+                "sample_id": sample_id,
+                "confidence": 0.0,
+                "max_confidence": 0.0,
+                "outcome": "review",
+                "needs_review": True,
+                "label_count": 0,
+                "split": None,
+            }
 
         if not label_lines:
             # Nichts erkannt: kein Trainingswert, nicht in die Review Queue

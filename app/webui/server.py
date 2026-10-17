@@ -11,6 +11,7 @@ ist identisch zu app/webui/api.py, nur die Uebertragung ist jetzt HTTP/JSON +
 Server-Sent-Events statt der pywebview-JS-Bruecke.
 """
 
+import dataclasses
 import json
 import os
 import queue
@@ -110,7 +111,7 @@ CHOICE_OPTIONS = {
 
 
 _ML_SUM_KEYS = ("events", "groups", "duplicates", "candidates", "auto_train", "auto_val",
-                "review", "review_capped", "discarded")
+                "review", "review_capped", "review_empty", "filled", "discarded")
 
 
 def _new_ml_totals() -> dict:
@@ -145,13 +146,17 @@ def _build_ml_report(totals: dict, cfg: Config, params: dict) -> dict:
         ("Schwellen-Stufe", params["stage"], stage_hint),
         ("Erkennungen im Video", totals["events"], "YOLO-Treffer auf den geprueften Frames"),
         ("Zusammengefasste Events", totals["groups"], f"Treffer < {cfg.ml_event_group_gap_sec:g}s Abstand = 1 Event"),
+        ("Gleichmaessig ergaenzt", totals["filled"],
+         "Frames ohne Event, damit ein fruehes Modell genug Material zum Labeln liefert"),
         ("Duplikate uebersprungen", totals["duplicates"], "fast identische Frames"),
         ("Frames vorgelabelt", totals["candidates"], "gespeicherte Kandidaten"),
         ("Auto -> Training", auto, auto_hint),
         ("Zur Review", totals["review"], review_hint),
+        ("  davon ohne Vorlabel", totals["review_empty"], "Modell erkennt noch nichts - bitte selbst Boxen zeichnen"),
         ("Review-Limit gekappt", totals["review_capped"],
          f"mehr als {params['max_review']} pro Video, am wenigsten unsichere entfernt"),
-        ("Verworfen", totals["discarded"], f"nichts >= {params['review_min']:.2f} erkannt"),
+        ("Verworfen", totals["discarded"],
+         f"nichts >= {params['review_min']:.2f} erkannt" if not params["keep_empty"] else "-"),
     ]
     buckets = [{"label": k, "count": v} for k, v in totals["conf_buckets"].items()]
 
@@ -710,7 +715,7 @@ class Core:
             auto_txt = f"{params['auto_threshold']:.2f}" if params["auto_threshold"] <= 1.0 else "aus"
             print(f"[ML] Schwellen-Stufe '{params['stage']}' ({params['labeled_images']} gelabelte Bilder): "
                   f"Auto-Training {auto_txt}, Review ab {params['review_min']:.2f}, "
-                  f"max. {params['max_review']} Review-Bilder pro Video")
+                  f"max. {params['max_review']} Review-Bilder pro Video, Event-Erkennung ab {params['detect_conf']:.2f}")
             for idx, video in enumerate(video_paths, start=1):
                 if cancel_event.is_set():
                     raise RuntimeError("Vorgang abgebrochen.")
@@ -728,7 +733,8 @@ class Core:
                 )
 
                 if ml_only:
-                    events = sorted(preload_yolo_events(video, self.cfg, progress_cb, cancel_event))
+                    detect_cfg = dataclasses.replace(self.cfg, yolo_confidence=params["detect_conf"])
+                    events = sorted(preload_yolo_events(video, detect_cfg, progress_cb, cancel_event))
                     result = {"yolo_event_times": events}
                 elif export_fcpxml:
                     result = export_fcpxml_timeline(
@@ -751,6 +757,8 @@ class Core:
                     auto_threshold=params["auto_threshold"],
                     review_min_confidence=params["review_min"],
                     max_review_per_video=params["max_review"],
+                    keep_empty=params["keep_empty"],
+                    fill_to=params["fill_frames"],
                     progress_callback=progress_cb,
                     status_callback=lambda text: self._push("status", text),
                     cancel_event=cancel_event,
