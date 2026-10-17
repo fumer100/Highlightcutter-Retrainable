@@ -15,6 +15,9 @@ class Game:
     review_queue_path: Path
     classes: list[str]
     llm_context: dict = field(default_factory=dict)  # Klasse -> Erklaerungstext fuers LLM-Scoring
+    # Klassen, die Highlight-Events ausloesen. None = globaler Standard (Config.yolo_target_classes),
+    # damit bestehende Spiele ohne dieses Feld unveraendert weiterlaufen.
+    event_classes: list[str] | None = None
 
 
 REQUIRED_FIELDS = ["model_path", "dataset_path", "review_queue_path", "classes"]
@@ -66,6 +69,17 @@ def _validate_game_entry(name: str, cfg: dict):
         )
 
     llm_context = cfg.get("llm_context")
+    event_classes = cfg.get("event_classes")
+    if event_classes is not None:
+        if (
+            not isinstance(event_classes, list)
+            or not event_classes
+            or any(c not in classes for c in event_classes)
+        ):
+            raise GamesConfigError(
+                f"Spiel '{name}': 'event_classes' muss eine nicht-leere Teilmenge von 'classes' sein, "
+                f"ist aber {event_classes!r}."
+            )
     if llm_context is not None:
         if not isinstance(llm_context, dict):
             raise GamesConfigError(
@@ -113,6 +127,7 @@ def _load_games() -> dict[str, Game]:
             review_queue_path=PROJECT_ROOT / cfg["review_queue_path"],
             classes=cfg["classes"],
             llm_context=cfg.get("llm_context", {}),
+            event_classes=cfg.get("event_classes"),
         )
 
     return games

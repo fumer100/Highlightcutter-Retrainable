@@ -342,7 +342,8 @@ select {
   white-space: pre-line;
 }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; }
-.form-row.hidden, .bootstrap-panel.hidden { display: none; }
+.form-row.hidden, .bootstrap-panel.hidden, #testModelResult.hidden, #testModelForm.hidden { display: none; }
+.test-modal { width: 560px; }
 .source-options { display: flex; flex-direction: column; gap: 6px; }
 .form-row .radio-row { font-weight: 500; color: var(--text); display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .bootstrap-panel { border-left: 4px solid var(--warning); }

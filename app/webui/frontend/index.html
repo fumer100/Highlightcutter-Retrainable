@@ -64,6 +64,7 @@
       -->
       <button id="mlPipelineFcpxmlBtn" class="btn btn-success">🚀 ML Pipeline + FCPXML (ohne Schneiden)</button>
       <button id="exportFcpxmlBtn" class="btn btn-outline">🎬 FCPXML-Timeline exportieren</button>
+      <button id="testModelBtn" class="btn btn-outline">🔍 Modell testen</button>
       <button id="trainBtn" class="btn btn-info">🧠 Train Model</button>
       <button id="cancelBtn" class="btn btn-danger" disabled>■ Abbrechen</button>
       <button id="reviewBtn" class="btn btn-warning">🧾 Review Queue (0)</button>
@@ -152,7 +153,7 @@
         <input type="text" id="newGameClasses" placeholder="event, hitmarker">
         <button id="loadClassesBtn" class="btn btn-outline">Aus JSON laden...</button>
       </div>
-      <small>Unterstützte JSON-Formate: ["a","b"] / {"classes":[...]} / {"names":{...}} / {"categories":[{"name":...}]}</small>
+      <small>Diese Namen sind später die Auswahl beim Boxen-Zeichnen in der Review und das, was YOLO erkennt. Eigene Namen frei wählbar (z.B. „kill, headshot, enemy“). Unterstützte JSON-Formate: ["a","b"] / {"classes":[...]} / {"names":{...}} / {"categories":[{"name":...}]}</small>
     </div>
 
     <div class="form-row info-row" id="newGamePathsInfo"></div>
@@ -160,6 +161,59 @@
     <div class="modal-actions">
       <button id="saveGameBtn" class="btn btn-primary">Speichern</button>
       <button id="cancelGameBtn" class="btn btn-outline">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<div id="testModelModal" class="modal hidden">
+  <div class="modal-content test-modal">
+    <h2>🔍 Modell testen</h2>
+
+    <div id="testModelForm">
+      <div class="form-row info-row" id="testModelGameInfo"></div>
+
+      <div class="form-row">
+        <label>Testvideo</label>
+        <div class="input-with-btn">
+          <input type="text" id="testVideoPath" readonly placeholder="Video auswählen...">
+          <button id="browseTestVideoBtn" class="btn btn-outline">Durchsuchen...</button>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>Mindest-Konfidenz (0-1)</label>
+        <input type="text" id="testConfidence" value="0.4">
+        <small>Nur Erkennungen ab dieser Sicherheit werden eingezeichnet.</small>
+      </div>
+
+      <div class="form-row">
+        <label>Jeden N-ten Frame prüfen</label>
+        <input type="text" id="testEveryN" value="10">
+        <small>Kleiner = genauer, aber langsamer. Das Ausgabe-Video ist entsprechend schneller (Zeitraffer).</small>
+      </div>
+
+      <div class="form-row">
+        <label>Nur die ersten X Minuten (0 = ganzes Video)</label>
+        <input type="text" id="testMaxMinutes" value="0">
+      </div>
+
+      <div class="modal-actions">
+        <button id="runTestBtn" class="btn btn-primary">Teste jetzt</button>
+        <button id="closeTestBtn" class="btn btn-outline">Schließen</button>
+      </div>
+    </div>
+
+    <div id="testModelResult" class="hidden">
+      <div class="form-row info-row" id="testResultSummary"></div>
+      <table class="report-table"><tbody id="testResultClasses"></tbody></table>
+      <div class="report-subtitle">Verteilung nach Konfidenz</div>
+      <table class="report-table"><tbody id="testResultBuckets"></tbody></table>
+      <div class="modal-actions">
+        <button id="openTestVideoBtn" class="btn btn-primary">▶ Video öffnen</button>
+        <button id="openTestFolderBtn" class="btn btn-outline">📂 Ordner zeigen</button>
+        <button id="testAgainBtn" class="btn btn-outline">Neuer Test</button>
+        <button id="closeTestResultBtn" class="btn btn-outline">Schließen</button>
+      </div>
     </div>
   </div>
 </div>

@@ -8,5 +8,6 @@ data/images/
 data/labels/
 *.pt
 *.onnx
+model_tests/
 *.pyc
 *.txt

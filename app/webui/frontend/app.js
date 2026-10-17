@@ -97,7 +97,7 @@ function renderBootstrapBanner() {
 
 function updateActionButtons() {
   const needsModel = state.currentGame && !state.hasModel;
-  const modelButtons = ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn"];
+  const modelButtons = ["mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "testModelBtn"];
   modelButtons.forEach((id) => {
     document.getElementById(id).disabled = state.busy || needsModel;
   });
@@ -125,6 +125,7 @@ function connectEvents() {
       case "reviewCount": onReviewCount(data); break;
       case "mlReport": onMlReport(data); break;
       case "stateChanged": refreshState(); break;
+      case "modelTestResult": onModelTestResult(data); break;
       case "firstModelReady": onFirstModelReady(data); break;
     }
   };
@@ -268,6 +269,36 @@ function bindEvents() {
     if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
   });
 
+  document.getElementById("testModelBtn").addEventListener("click", openTestModelModal);
+  document.getElementById("closeTestBtn").addEventListener("click", closeTestModelModal);
+  document.getElementById("closeTestResultBtn").addEventListener("click", closeTestModelModal);
+  document.getElementById("testAgainBtn").addEventListener("click", showTestForm);
+  document.getElementById("browseTestVideoBtn").addEventListener("click", async () => {
+    const res = await apiPost("/api/pick_files", { kind: "video" });
+    if (res.ok && res.paths.length) document.getElementById("testVideoPath").value = res.paths[0];
+  });
+  document.getElementById("runTestBtn").addEventListener("click", async () => {
+    const videoPath = document.getElementById("testVideoPath").value.trim();
+    if (!videoPath) { showToast("Bitte ein Testvideo auswählen.", "warn"); return; }
+    setBusy(true);
+    const res = await apiPost("/api/test_model", {
+      videoPath,
+      confidence: parseFloat(document.getElementById("testConfidence").value),
+      sampleEveryN: parseInt(document.getElementById("testEveryN").value, 10),
+      maxMinutes: parseFloat(document.getElementById("testMaxMinutes").value) || 0,
+    });
+    if (res.ok) closeTestModelModal();
+    else { setBusy(false); showToast(res.error, "error"); }
+  });
+  document.getElementById("openTestVideoBtn").addEventListener("click", async () => {
+    const res = await apiPost("/api/open_test_output", { folder: false });
+    if (!res.ok) showToast(res.error, "error");
+  });
+  document.getElementById("openTestFolderBtn").addEventListener("click", async () => {
+    const res = await apiPost("/api/open_test_output", { folder: true });
+    if (!res.ok) showToast(res.error, "error");
+  });
+
   document.getElementById("trainBtn").addEventListener("click", async () => {
     setBusy(true);
     const res = await apiPost("/api/run_training");
@@ -356,6 +387,48 @@ function updateGameSourceRows() {
   const source = document.querySelector('input[name="gameSource"]:checked').value;
   document.getElementById("sourceModelRow").classList.toggle("hidden", source !== "model");
   document.getElementById("sourceVideoRow").classList.toggle("hidden", source !== "video");
+}
+
+function openTestModelModal() {
+  document.getElementById("testModelGameInfo").textContent =
+    `Spiel: ${state.currentGame}\nModell: ${state.modelPath || "-"}`;
+  const confInput = document.querySelector('#settingsBody [data-attr="yolo_confidence"]');
+  if (confInput && confInput.value) document.getElementById("testConfidence").value = confInput.value;
+  showTestForm();
+  document.getElementById("testModelModal").classList.remove("hidden");
+}
+
+function closeTestModelModal() {
+  document.getElementById("testModelModal").classList.add("hidden");
+}
+
+function showTestForm() {
+  document.getElementById("testModelForm").classList.remove("hidden");
+  document.getElementById("testModelResult").classList.add("hidden");
+}
+
+function onModelTestResult(r) {
+  const pct = (a, b) => (b ? ((a / b) * 100).toFixed(0) : "0");
+  document.getElementById("testResultSummary").textContent =
+    `Spiel: ${r.game}\n` +
+    `Geprüfte Frames: ${r.framesChecked} (jeder ${r.sampleEveryN}., Mindest-Konfidenz ${r.confidence})\n` +
+    `Frames mit Erkennung: ${r.framesWithDetection} (${pct(r.framesWithDetection, r.framesChecked)} %)\n` +
+    `Erkennungen gesamt: ${r.detections}, Ø Konfidenz: ${r.avgConfidence.toFixed(2)}\n` +
+    (r.firstTimes.length ? `Erste Erkennungen bei: ${r.firstTimes.map((t) => t + "s").join(", ")}\n` : "") +
+    `Test-Video: ${r.outputPath}`;
+
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  document.getElementById("testResultClasses").innerHTML = r.classes.length
+    ? r.classes.map((c) =>
+        `<tr><td>${esc(c.name)}</td><td class="num">${c.count}</td>` +
+        `<td class="hint">Ø ${c.avg.toFixed(2)} (min ${c.min.toFixed(2)}, max ${c.max.toFixed(2)})</td></tr>`).join("")
+    : `<tr><td colspan="3" class="hint">Keine Erkennungen. Konfidenz senken oder anderes Video testen.</td></tr>`;
+  document.getElementById("testResultBuckets").innerHTML = r.buckets.map((b) =>
+    `<tr><td>${esc(b.label)}</td><td class="num">${b.count}</td><td></td></tr>`).join("");
+
+  document.getElementById("testModelForm").classList.add("hidden");
+  document.getElementById("testModelResult").classList.remove("hidden");
+  document.getElementById("testModelModal").classList.remove("hidden");
 }
 
 function onFirstModelReady({ game, modelPath, versionsDir }) {

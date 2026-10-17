@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog
 import webbrowser
@@ -32,6 +33,7 @@ if root_path not in sys.path:
 from app.cutter.highlight_cutter_pointbased import Config, process_video, export_fcpxml_timeline
 from app.core.pipeline_controller import PipelineController
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
+from app.core.model_tester import test_model_on_video
 from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
 from app.training.trainer import Trainer
@@ -172,6 +174,7 @@ class Core:
         self._review_images: list[Path] = []
         self.event_queue: "queue.Queue[dict]" = queue.Queue()
         self.cancel_event = None
+        self.last_test_output = None
 
     # ------------------------------------------------------------
     # Interna
@@ -210,7 +213,12 @@ class Core:
         return self._pipeline_controllers[self.current_game]
 
     def _sync_model_path(self):
-        self.cfg.yolo_model_path = str(self._dm().game.model_path)
+        game = self._dm().game
+        self.cfg.yolo_model_path = str(game.model_path)
+        # Pro Spiel: eigene Event-Klassen, sonst der globale Standard (bestehende Spiele)
+        self.cfg.yolo_target_classes = (
+            list(game.event_classes) if game.event_classes else list(Config().yolo_target_classes)
+        )
 
     def _review_count(self) -> int:
         try:
@@ -409,6 +417,7 @@ class Core:
                 "dataset_path": f"datasets/{name}",
                 "review_queue_path": f"review_queue/{name}",
                 "classes": classes,
+                "event_classes": list(classes),  # neue Spiele: alle eigenen Klassen werden von YOLO erkannt/als Event genutzt
             }
 
             with open(GAMES_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -661,6 +670,74 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
+    def test_model(self, video_path: str, confidence: float, sample_every_n: int, max_minutes: float):
+        if not video_path or not Path(video_path).is_file():
+            return {"ok": False, "error": "Bitte ein gueltiges Testvideo auswaehlen."}
+        if self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+        if (err := self._require_model()):
+            return err
+        try:
+            confidence = float(confidence)
+            sample_every_n = int(sample_every_n)
+            max_minutes = float(max_minutes or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "Ungueltige Test-Einstellungen."}
+        if not 0 < confidence < 1 or sample_every_n < 1 or max_minutes < 0:
+            return {"ok": False, "error": "Konfidenz muss zwischen 0 und 1 liegen, 'jeder N-te Frame' >= 1."}
+
+        self.cancel_event = threading.Event()
+        threading.Thread(
+            target=self._test_model_worker,
+            args=(video_path, confidence, sample_every_n, max_minutes, self.cancel_event),
+            daemon=True,
+        ).start()
+        return {"ok": True}
+
+    def _test_model_worker(self, video_path, confidence, sample_every_n, max_minutes, cancel_event):
+        real_stdout = sys.stdout
+        sys.stdout = _LogStream(self)
+        self._push("busy", True)
+        try:
+            game = self._dm().game
+            out_dir = PROJECT_ROOT / "model_tests" / game.name
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            output_path = str(out_dir / f"{Path(video_path).stem}_modelltest_{stamp}.mp4")
+
+            self._push("status", f"Modell-Test: {os.path.basename(video_path)}")
+            result = test_model_on_video(
+                model_path=str(game.model_path),
+                video_path=video_path,
+                output_path=output_path,
+                confidence=confidence,
+                sample_every_n=sample_every_n,
+                max_minutes=max_minutes,
+                progress_callback=lambda phase, pct: self._push("progress", {"phase": phase, "percent": pct}),
+                cancel_event=cancel_event,
+            )
+            self.last_test_output = output_path
+            result["game"] = game.name
+            result["modelPath"] = str(game.model_path)
+            self._push("status", "Modell-Test fertig")
+            self._push("modelTestResult", result)
+            self._push("done", {"message": f"Modell-Test fertig: {result['detections']} Erkennungen."})
+        except Exception as e:
+            self._push("cancelled" if cancel_event.is_set() else "error", str(e))
+        finally:
+            sys.stdout = real_stdout
+            self.cancel_event = None
+            self._push("busy", False)
+
+    def open_last_test_output(self, folder: bool = False):
+        path = self.last_test_output
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "Noch kein Test-Video vorhanden."}
+        if folder:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        else:
+            os.startfile(path)
+        return {"ok": True}
+
     def export_fcpxml(self, video_paths: list):
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
@@ -873,7 +950,7 @@ def api_extract_classes_from_json():
 def api_add_game():
     data = request.get_json(force=True)
     return jsonify(core.add_game(
-        data.get("name"), data.get("modelPath"), data.get("classes"), data.get("videoPaths")
+        data.get("name"), data.get("modelPath"), data.get("classes"), data.get("videoPaths"),
     ))
 
 
@@ -886,6 +963,19 @@ def api_start_processing():
 def api_run_ml_pipeline():
     data = request.get_json(force=True)
     return jsonify(core.run_ml_pipeline(data.get("videos", []), bool(data.get("exportFcpxml", False))))
+
+
+@app.route("/api/test_model", methods=["POST"])
+def api_test_model():
+    d = request.get_json(force=True)
+    return jsonify(core.test_model(
+        d.get("videoPath"), d.get("confidence", 0.4), d.get("sampleEveryN", 10), d.get("maxMinutes", 0)
+    ))
+
+
+@app.route("/api/open_test_output", methods=["POST"])
+def api_open_test_output():
+    return jsonify(core.open_last_test_output(bool(request.get_json(force=True).get("folder", False))))
 
 
 @app.route("/api/export_fcpxml", methods=["POST"])
