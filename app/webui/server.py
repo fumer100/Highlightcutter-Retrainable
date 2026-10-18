@@ -34,7 +34,9 @@ if root_path not in sys.path:
 from app.cutter.highlight_cutter_pointbased import (
     Config, export_fcpxml_timeline, preload_yolo_events, process_video,
 )
-from app.core.pipeline_controller import PipelineController
+from app.core.pipeline_controller import (
+    COLLECT_EVENT_SHARE, COLLECT_MIN_CONFIDENCE, PipelineController, split_quota, video_duration,
+)
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
 from app.core.adaptive_thresholds import resolve_ml_params
 from app.core.model_tester import test_model_on_video
@@ -100,6 +102,7 @@ SETTINGS_SCHEMA = [
     ("ml_auto_train_threshold", "ML: Auto-Training ab Konfidenz", "float", "Bilder, bei denen auch die SCHWAECHSTE Box mindestens so sicher ist, gehen ohne Review direkt ins Training (0.0-1.0). Gilt nicht bei Spielen mit automatischer Stufen-Schwelle (Spiel bearbeiten)"),
     ("ml_review_min_confidence", "ML: Review ab Konfidenz", "float", "Zwischen diesem Wert und der Auto-Training-Schwelle landet ein Bild in der Review Queue, darunter (nichts erkannt) wird es verworfen. Gilt nicht bei automatischer Stufen-Schwelle"),
     ("ml_max_review_per_video", "ML: Max. Review-Bilder pro Video", "int", "Begrenzt die Review Queue pro Video auf die unsichersten Bilder (0 = unbegrenzt). Gilt nicht bei automatischer Stufen-Schwelle"),
+    ("ml_collect_frames", "ML: Frames beim Daten sammeln", "int", "Ziel-Anzahl Frames pro Lauf von 'Daten sammeln' (auf alle gewaehlten Videos nach Laenge verteilt). Etwa die Haelfte stammt von Modell-Events, der Rest sind neue Frames. Alles landet in der Review Queue, nichts geht automatisch ins Training"),
     ("ml_event_group_gap_sec", "ML: Event-Zusammenfassung (s)", "float", "Erkennungen mit kleinerem zeitlichen Abstand gelten als ein Event"),
     ("ml_frames_per_event", "ML: Frames pro Event", "int", "Wie viele Frames pro Event extrahiert werden"),
     ("ml_duplicate_threshold", "ML: Duplikat-Schwelle", "float", "Frames, die einem schon gespeicherten Frame so aehnlich sind (mittlere Grauwert-Abweichung 0-255), werden uebersprungen"),
@@ -119,7 +122,8 @@ CHOICE_OPTIONS = {
 
 
 _ML_SUM_KEYS = ("events", "groups", "duplicates", "candidates", "auto_train", "auto_val",
-                "review", "review_capped", "review_empty", "filled", "discarded")
+                "review", "review_capped", "review_empty", "filled", "discarded",
+                "prelabeled", "collect_events", "collect_new", "collect_quota")
 
 
 def _new_ml_totals() -> dict:
@@ -133,6 +137,31 @@ def _add_ml_stats(totals: dict, stats: dict):
         totals[k] += stats.get(k, 0)
     for label, n in stats.get("conf_buckets", {}).items():
         totals["conf_buckets"][label] = totals["conf_buckets"].get(label, 0) + n
+
+
+def _build_collect_report(totals: dict, cfg: Config, target: int, detect_conf: float) -> dict:
+    rows = [
+        ("Modus", "Daten sammeln", "alles kommt in die Review Queue, nichts geht automatisch ins Training"),
+        ("Ziel-Frames", target, f"Einstellung 'ML: Frames beim Daten sammeln'"),
+        ("Erkennungen im Video", totals["events"], f"Event-Erkennung ab Konfidenz {detect_conf:.2f}"),
+        ("Zusammengefasste Events", totals["groups"], f"Treffer < {cfg.ml_event_group_gap_sec:g}s Abstand = 1 Event"),
+        ("In der Review gelandet", totals["review"], f"{totals['review']} von {target} Ziel-Frames"),
+        ("  von Modell-Events", totals["collect_events"], "Frames an Stellen, wo das Modell etwas erkannt hat"),
+        ("  neue Frames", totals["collect_new"], "gleichmaessig im Video verteilt, unabhaengig vom Modell"),
+        ("  mit Vorlabel", totals["prelabeled"], "Modell schlaegt Boxen vor - bitte pruefen und korrigieren"),
+        ("  ohne Vorlabel", totals["review_empty"], "Modell erkennt nichts - bitte selbst Boxen zeichnen (oder leer lassen)"),
+        ("Duplikate uebersprungen", totals["duplicates"], "fast identische Frames"),
+    ]
+    buckets = [{"label": k, "count": v} for k, v in totals["conf_buckets"].items()]
+    lines = ["===== ML-Bericht (Daten sammeln) ====="]
+    lines += [f"{label:<28}{value:>6}   ({hint})" for label, value, hint in rows]
+    lines.append("Konfidenz der Vorlabels (schwaechste Box):")
+    lines += [f"  {b['label']}: {b['count']}" for b in buckets]
+    return {
+        "rows": [{"label": l, "value": v, "hint": h} for l, v, h in rows],
+        "buckets": buckets,
+        "text": "\n".join(lines),
+    }
 
 
 def _build_ml_report(totals: dict, cfg: Config, params: dict) -> dict:
@@ -775,11 +804,21 @@ class Core:
             totals = _new_ml_totals()
             total_clips = 0
             dm = self._dm()
-            params = resolve_ml_params(self.cfg, dm.game.adaptive_thresholds, dm.labeled_stats()["with_boxes"])
-            auto_txt = f"{params['auto_threshold']:.2f}" if params["auto_threshold"] <= 1.0 else "aus"
-            print(f"[ML] Schwellen-Stufe '{params['stage']}' ({params['labeled_images']} gelabelte Bilder): "
-                  f"Auto-Training {auto_txt}, Review ab {params['review_min']:.2f}, "
-                  f"max. {params['max_review']} Review-Bilder pro Video, Event-Erkennung ab {params['detect_conf']:.2f}")
+            params = None
+            if ml_only:
+                # Daten sammeln: festes Frame-Ziel, nach Videolaenge auf die Videos verteilt
+                target = max(1, int(self.cfg.ml_collect_frames))
+                quotas = split_quota([video_duration(v) for v in video_paths], target)
+                collect_conf = min(self.cfg.yolo_confidence, COLLECT_MIN_CONFIDENCE)
+                print(f"[ML] Daten sammeln: Ziel {target} Frames (je ca. {COLLECT_EVENT_SHARE:.0%} von Events und "
+                      f"neue Frames), Event-Erkennung und Vorlabels ab {collect_conf:.2f}, alles in die Review")
+            else:
+                params = resolve_ml_params(self.cfg, dm.game.adaptive_thresholds, dm.labeled_stats()["with_boxes"])
+                auto_txt = f"{params['auto_threshold']:.2f}" if params["auto_threshold"] <= 1.0 else "aus"
+                print(f"[ML] Schwellen-Stufe '{params['stage']}' ({params['labeled_images']} gelabelte Bilder): "
+                      f"Auto-Training {auto_txt}, Review ab {params['review_min']:.2f}, "
+                      f"max. {params['max_review']} Review-Bilder pro Video, "
+                      f"Event-Erkennung ab {params['detect_conf']:.2f}")
             for idx, video in enumerate(video_paths, start=1):
                 if cancel_event.is_set():
                     raise RuntimeError("Vorgang abgebrochen.")
@@ -797,10 +836,28 @@ class Core:
                 )
 
                 if ml_only:
-                    detect_cfg = dataclasses.replace(self.cfg, yolo_confidence=params["detect_conf"])
-                    events = sorted(preload_yolo_events(video, detect_cfg, progress_cb, cancel_event))
-                    result = {"yolo_event_times": events}
-                elif export_fcpxml:
+                    if quotas[idx - 1] <= 0:
+                        print(f"[ML] {os.path.basename(video)}: Laenge unbekannt/zu kurz, uebersprungen.")
+                    else:
+                        detect_cfg = dataclasses.replace(self.cfg, yolo_confidence=collect_conf)
+                        events = sorted(preload_yolo_events(video, detect_cfg, progress_cb, cancel_event))
+                        stats = self._pc().run_collect_cycle(
+                            video_path=video,
+                            events=events,
+                            quota=quotas[idx - 1],
+                            event_group_gap_sec=self.cfg.ml_event_group_gap_sec,
+                            frames_per_event=self.cfg.ml_frames_per_event,
+                            duplicate_threshold=self.cfg.ml_duplicate_threshold,
+                            min_confidence=collect_conf,
+                            progress_callback=progress_cb,
+                            status_callback=lambda text: self._push("status", text),
+                            cancel_event=cancel_event,
+                        )
+                        _add_ml_stats(totals, stats)
+                    self._push("overallProgress", {"idx": idx, "total": total})
+                    continue
+
+                if export_fcpxml:
                     result = export_fcpxml_timeline(
                         output_path=os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml"),
                         **analysis_kwargs,
@@ -830,16 +887,24 @@ class Core:
                 _add_ml_stats(totals, stats)
                 self._push("overallProgress", {"idx": idx, "total": total})
 
-            report = _build_ml_report(totals, self.cfg, params)
+            if ml_only:
+                report = _build_collect_report(totals, self.cfg, target, collect_conf)
+                message = (
+                    f"Daten sammeln fertig: {totals['review']} Frames in der Review Queue "
+                    f"({totals['prelabeled']} mit Vorlabel, {totals['review_empty']} ohne). "
+                    f"Bitte in der Review pruefen und korrigieren."
+                )
+            else:
+                report = _build_ml_report(totals, self.cfg, params)
+                message = (
+                    f"ML-Pipeline fertig: {totals['auto_train'] + totals['auto_val']} automatisch ins Training, "
+                    f"{totals['review']} zur Review, {totals['discarded']} verworfen "
+                    f"(Details im ML-Bericht)."
+                )
             print("\n" + report["text"])
             self._push("mlReport", report)
             self._push("reviewCount", self._review_count())
             self._push("status", "ML-Pipeline fertig")
-            message = (
-                f"ML-Pipeline fertig: {totals['auto_train'] + totals['auto_val']} automatisch ins Training, "
-                f"{totals['review']} zur Review, {totals['discarded']} verworfen "
-                f"(Details im ML-Bericht)."
-            )
             if export_fcpxml:
                 message += f"\n{total_clips} Clips als FCPXML exportiert (KEIN Video geschnitten)"
             self._push("done", {"message": message})

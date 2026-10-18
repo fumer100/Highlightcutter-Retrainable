@@ -174,6 +174,7 @@ class Config:
     ml_auto_train_threshold: float = 0.85  # ab dieser Konfidenz (schwaechste Box!) automatisch ins Training
     ml_review_min_confidence: float = 0.25  # darunter wird verworfen, dazwischen Review Queue
     ml_max_review_per_video: int = 30  # max. Review-Bilder pro Video (0 = unbegrenzt)
+    ml_collect_frames: int = 200  # Ziel-Anzahl Frames pro Lauf im Modus "Daten sammeln" (alles landet in der Review)
 
 
 def fmt_time(sec: float) -> str:

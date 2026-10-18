@@ -111,11 +111,18 @@ class FrameExtractor:
         duplicate_threshold: float = 3.0,
         progress_callback=None,
         cancel_event=None,
+        max_keep: int | None = None,
+        keep_order: bool = False,
+        kept_timestamps: list | None = None,
     ):
         """
         Extrahiert genau EINEN Frame pro Zeitstempel (keine Nachbarframes) und
         ueberspringt Frames, die einem bereits extrahierten Frame dieses Videos
         fast gleichen (mittlere Grauwert-Abweichung auf 32x32 < duplicate_threshold).
+
+        max_keep: hoert auf, sobald so viele Frames gespeichert wurden (Rest der Liste dient als Reserve).
+        keep_order: Zeitstempel in der uebergebenen Reihenfolge abarbeiten (sonst aufsteigend sortiert).
+        kept_timestamps: wird (falls angegeben) mit den Zeitstempeln der gespeicherten Frames gefuellt.
 
         Gibt (sample_ids, duplicates_skipped) zurueck.
         """
@@ -125,15 +132,18 @@ class FrameExtractor:
             raise RuntimeError(f"Video konnte nicht geladen werden: {video_path}")
 
         fps = cap.get(cv2.CAP_PROP_FPS)
-        total = len(timestamps)
+        order = list(timestamps) if keep_order else sorted(timestamps)
+        total = max(1, len(order))
         kept_thumbs = []
         sample_ids = []
         duplicates = 0
 
         try:
-            for i, t in enumerate(sorted(timestamps)):
+            for i, t in enumerate(order):
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("Vorgang abgebrochen.")
+                if max_keep is not None and len(sample_ids) >= max_keep:
+                    break
 
                 frame_number = max(0, int(round(t * fps)))
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
@@ -147,9 +157,14 @@ class FrameExtractor:
                 else:
                     kept_thumbs.append(thumb)
                     sample_ids.append(self._write_sample(frame, video_path, frame_number, t, model_version))
+                    if kept_timestamps is not None:
+                        kept_timestamps.append(t)
 
                 if progress_callback is not None:
-                    progress_callback("Frames extrahieren", (i + 1) / total * 100)
+                    pct = (i + 1) / total * 100
+                    if max_keep:
+                        pct = max(pct, len(sample_ids) / max_keep * 100)
+                    progress_callback("Frames extrahieren", min(100.0, pct))
         finally:
             cap.release()
 
