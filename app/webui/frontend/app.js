@@ -27,18 +27,33 @@ function classColor(cls) {
 // Kleiner Fetch-Helfer
 // ------------------------------------------------------------
 
+async function readJson(res) {
+  try {
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: `Server-Fehler (HTTP ${res.status})` };
+  }
+}
+
 async function apiGet(path) {
-  const res = await fetch(path);
-  return res.json();
+  try {
+    return await readJson(await fetch(path));
+  } catch (e) {
+    return { ok: false, error: "Server nicht erreichbar." };
+  }
 }
 
 async function apiPost(path, body) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  });
-  return res.json();
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+    return await readJson(res);
+  } catch (e) {
+    return { ok: false, error: "Server nicht erreichbar." };
+  }
 }
 
 // ------------------------------------------------------------
@@ -933,13 +948,18 @@ function canvasPos(e) {
 }
 
 function findBox(x, y) {
+  // Bei ueberlappenden Boxen die kleinste getroffene waehlen, sonst ist eine Box in einer groesseren nie anklickbar
+  let best = null, bestArea = Infinity;
   for (let i = 0; i < state.reviewBoxes.length; i++) {
     const b = state.reviewBoxes[i];
     const cx = b.x * canvas.width, cy = b.y * canvas.height;
     const w = b.w * canvas.width, h = b.h * canvas.height;
-    if (x >= cx - w / 2 && x <= cx + w / 2 && y >= cy - h / 2 && y <= cy + h / 2) return i;
+    if (x >= cx - w / 2 && x <= cx + w / 2 && y >= cy - h / 2 && y <= cy + h / 2 && w * h < bestArea) {
+      best = i;
+      bestArea = w * h;
+    }
   }
-  return null;
+  return best;
 }
 
 function hitTestHandle(idx, x, y) {
@@ -1062,21 +1082,25 @@ function deleteSelectedBox() {
   saveLabels();
 }
 
-async function acceptCurrent() {
+let reviewBusy = false;
+
+// Accept/Reject nie parallel ausfuehren (Doppelklick, Tasten-Wiederholung bei gehaltener Taste)
+async function reviewAction(kind) {
+  if (reviewBusy) return;
   const entry = state.reviewImages[state.reviewIndex];
   if (!entry) return;
-  const res = await apiPost(`/api/review/accept/${entry.id}`);
-  if (res.ok) removeCurrentFromList();
-  else showToast(res.error, "error");
+  reviewBusy = true;
+  try {
+    const res = await apiPost(`/api/review/${kind}/${entry.id}`);
+    if (res.ok) removeCurrentFromList();
+    else showToast(res.error || "Aktion fehlgeschlagen.", "error");
+  } finally {
+    reviewBusy = false;
+  }
 }
 
-async function rejectCurrent() {
-  const entry = state.reviewImages[state.reviewIndex];
-  if (!entry) return;
-  const res = await apiPost(`/api/review/reject/${entry.id}`);
-  if (res.ok) removeCurrentFromList();
-  else showToast(res.error, "error");
-}
+function acceptCurrent() { return reviewAction("accept"); }
+function rejectCurrent() { return reviewAction("reject"); }
 
 function removeCurrentFromList() {
   state.reviewImages.splice(state.reviewIndex, 1);

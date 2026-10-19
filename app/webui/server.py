@@ -15,6 +15,7 @@ import dataclasses
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -1127,11 +1128,14 @@ class Core:
             "images": [{"id": p.stem} for p in self._review_images],
         }
 
+    _SAMPLE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
     def find_review_image_path(self, sample_id: str):
-        for p in self._review_images:
-            if p.stem == sample_id:
-                return p
-        return None
+        """Sucht das Bild direkt im Review-Ordner des AKTUELLEN Spiels (kein veralteter Zwischenspeicher)."""
+        if not self._SAMPLE_ID_RE.match(sample_id or ""):
+            return None
+        path = self._dm().review_images / f"{sample_id}.jpg"
+        return path if path.is_file() else None
 
     def review_get_labels(self, sample_id: str):
         dm = self._dm()
@@ -1164,15 +1168,29 @@ class Core:
             with open(meta_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
 
+    @staticmethod
+    def _retry_locked(action, attempts: int = 6, delay: float = 0.25):
+        """Windows sperrt Dateien kurz, solange der Browser sie noch laedt: kurz erneut versuchen."""
+        for attempt in range(attempts):
+            try:
+                return action()
+            except PermissionError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
+
     def review_accept(self, sample_id: str):
         dm = self._dm()
         img_path = self.find_review_image_path(sample_id)
         if img_path is None:
-            return {"ok": False, "error": "Bild nicht gefunden."}
+            return {"ok": False, "error": "Bild nicht gefunden (evtl. schon bearbeitet)."}
 
         label_path = dm.review_labels / f"{sample_id}.txt"
-        self._mark_meta(sample_id, True)
-        dm.route_promoted_sample(img_path, label_path)
+        try:
+            self._mark_meta(sample_id, True)
+            self._retry_locked(lambda: dm.route_promoted_sample(img_path, label_path))
+        except OSError as e:
+            return {"ok": False, "error": f"Accept fehlgeschlagen: {e}"}
 
         self._review_images = [p for p in self._review_images if p.stem != sample_id]
         return {"ok": True, "remaining": len(self._review_images)}
@@ -1181,19 +1199,13 @@ class Core:
         dm = self._dm()
         img_path = self.find_review_image_path(sample_id)
         if img_path is None:
-            return {"ok": False, "error": "Bild nicht gefunden."}
+            return {"ok": False, "error": "Bild nicht gefunden (evtl. schon bearbeitet)."}
 
-        label_path = dm.review_labels / f"{sample_id}.txt"
-        meta_path = dm.review_metadata / f"{sample_id}.json"
-        self._mark_meta(sample_id, False)
-
-        discard_dir = dm.review / "discarded"
-        discard_dir.mkdir(exist_ok=True)
-        img_path.rename(discard_dir / img_path.name)
-        if label_path.exists():
-            label_path.rename(discard_dir / label_path.name)
-        if meta_path.exists():
-            meta_path.rename(discard_dir / meta_path.name)
+        try:
+            self._mark_meta(sample_id, False)
+            self._retry_locked(lambda: dm.discard_sample(sample_id))
+        except OSError as e:
+            return {"ok": False, "error": f"Reject fehlgeschlagen: {e}"}
 
         self._review_images = [p for p in self._review_images if p.stem != sample_id]
         return {"ok": True, "remaining": len(self._review_images)}
@@ -1362,6 +1374,21 @@ def api_review_labels(sample_id):
 @app.route("/api/review/labels/<sample_id>", methods=["POST"])
 def api_review_save_labels(sample_id):
     return jsonify(core.review_save_labels(sample_id, request.get_json(force=True).get("boxes", [])))
+
+
+@app.errorhandler(Exception)
+def _api_error(exc):
+    """API-Fehler immer als JSON melden, damit das Frontend sie anzeigen kann (statt HTML-Fehlerseite)."""
+    from werkzeug.exceptions import HTTPException
+
+    if not request.path.startswith("/api/"):
+        if isinstance(exc, HTTPException):
+            return exc
+        raise exc
+    if isinstance(exc, HTTPException):
+        return jsonify({"ok": False, "error": exc.description}), exc.code
+    print(f"[API-Fehler] {request.path}: {type(exc).__name__}: {exc}")
+    return jsonify({"ok": False, "error": f"Interner Fehler: {exc}"}), 500
 
 
 @app.route("/api/review/accept/<sample_id>", methods=["POST"])
