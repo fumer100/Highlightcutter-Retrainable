@@ -221,6 +221,17 @@ select {
   margin-bottom: 16px;
 }
 
+.collect-group { display: inline-flex; align-items: center; gap: 6px; }
+.collect-group label { font-size: 12px; color: var(--text-dim); }
+.collect-group input {
+  width: 72px;
+  background: var(--bg-alt);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 8px;
+}
+
 .progress-block { margin-bottom: 10px; }
 .progress-label { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .progress-bar {

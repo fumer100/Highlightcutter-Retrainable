@@ -81,6 +81,7 @@ function applyState(s) {
   state.firstModelMinLabeled = s.firstModelMinLabeled || 20;
   renderGameDropdown();
   renderSettings(s.settingsSchema);
+  syncCollectFrames();
   updateSettingsHeader(s.settingsCustomized);
   updateReviewBadge(s.reviewCount);
   renderBootstrapBanner();
@@ -111,12 +112,22 @@ function renderBootstrapBanner() {
   step2.textContent = `Erstes Modell trainieren: Button „Erstes Modell trainieren“ (dauert je nach GPU einige Minuten).`;
 }
 
+// Das Feld neben "Daten sammeln" und die Einstellung im Panel zeigen immer denselben Wert
+function syncCollectFrames(value) {
+  const panelInput = document.querySelector('#settingsBody [data-attr="ml_collect_frames"]');
+  const quick = document.getElementById("mlCollectFrames");
+  if (value === undefined || value === null || Number.isNaN(value)) value = panelInput ? panelInput.value : quick.value;
+  quick.value = value;
+  if (panelInput) panelInput.value = value;
+}
+
 function updateActionButtons() {
   const needsModel = state.currentGame && !state.hasModel;
   const modelButtons = ["mlOnlyBtn", "mlPipelineFcpxmlBtn", "exportFcpxmlBtn", "testModelBtn"];
   modelButtons.forEach((id) => {
     document.getElementById(id).disabled = state.busy || needsModel;
   });
+  document.getElementById("mlCollectFrames").disabled = !!state.busy || !!needsModel;
   document.getElementById("trainBtn").disabled = !!state.busy;
   document.getElementById("cancelBtn").disabled = !state.busy;
 }
@@ -258,6 +269,7 @@ function bindEvents() {
     const res = await apiPost("/api/apply_settings", values);
     if (res.ok) {
       updateSettingsHeader(res.customized);
+      syncCollectFrames(values.ml_collect_frames);
       showToast(`Einstellungen für '${res.game}' gespeichert.`, "success");
     } else if (res.error) showToast(res.error, "error");
     else showToast("Ungültige Felder: " + res.errors.join(", "), "error");
@@ -267,6 +279,7 @@ function bindEvents() {
     const res = await apiPost("/api/reset_settings");
     if (!res.ok) { showToast(res.error, "error"); return; }
     renderSettings(res.settingsSchema);
+    syncCollectFrames();
     updateSettingsHeader(false);
     showToast(`Einstellungen für '${state.currentGame}' auf Standard zurückgesetzt.`, "success");
   });
@@ -288,9 +301,13 @@ function bindEvents() {
 
   document.getElementById("mlOnlyBtn").addEventListener("click", async () => {
     if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+    const frames = parseInt(document.getElementById("mlCollectFrames").value, 10);
+    if (!Number.isInteger(frames) || frames < 1) { showToast("Bitte eine gültige Frame-Anzahl eingeben.", "warn"); return; }
     setBusy(true);
-    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos, mlOnly: true });
-    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos, mlOnly: true, collectFrames: frames });
+    if (!res.ok) { setBusy(false); showToast(res.error, "error"); return; }
+    syncCollectFrames(res.collectFrames);
+    if (res.customized !== null && res.customized !== undefined) updateSettingsHeader(res.customized);
   });
 
   document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", async () => {

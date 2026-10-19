@@ -122,6 +122,8 @@ CHOICE_OPTIONS = {
 }
 
 
+MAX_COLLECT_FRAMES = 5000  # Obergrenze fuer 'Daten sammeln' (Schutz vor Tippfehlern)
+
 _ML_SUM_KEYS = ("events", "groups", "duplicates", "candidates", "auto_train", "auto_val",
                 "review", "review_capped", "review_empty", "filled", "discarded",
                 "prelabeled", "collect_events", "collect_new", "collect_quota")
@@ -775,10 +777,12 @@ class Core:
             self.cancel_event = None
             self._push("busy", False)
 
-    def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False, ml_only: bool = False):
+    def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False, ml_only: bool = False,
+                        collect_frames=None):
         """
         export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden.
         ml_only=True: nur Events erkennen + ML-Pipeline (Daten sammeln), weder schneiden noch FCPXML.
+        collect_frames: Ziel-Frames fuer 'Daten sammeln'; wird fuer das aktuelle Spiel gespeichert.
         """
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
@@ -786,13 +790,27 @@ class Core:
             return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+
+        customized = None
+        if ml_only and collect_frames is not None:
+            try:
+                value = int(collect_frames)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "Die Frame-Anzahl muss eine ganze Zahl sein."}
+            if not 1 <= value <= MAX_COLLECT_FRAMES:
+                return {"ok": False, "error": f"Die Frame-Anzahl muss zwischen 1 und {MAX_COLLECT_FRAMES} liegen."}
+            self.cfg.ml_collect_frames = value
+            try:
+                customized = self._persist_game_cfg(self.current_game)
+            except OSError as e:
+                return {"ok": False, "error": f"Einstellung konnte nicht gespeichert werden: {e}"}
         self.cancel_event = threading.Event()
         threading.Thread(
             target=self._ml_pipeline_worker,
             args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only)),
             daemon=True,
         ).start()
-        return {"ok": True}
+        return {"ok": True, "customized": customized, "collectFrames": self.cfg.ml_collect_frames}
 
     def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False):
         real_stdout = sys.stdout
@@ -1306,7 +1324,8 @@ def api_start_processing():
 def api_run_ml_pipeline():
     data = request.get_json(force=True)
     return jsonify(core.run_ml_pipeline(
-        data.get("videos", []), bool(data.get("exportFcpxml", False)), bool(data.get("mlOnly", False))
+        data.get("videos", []), bool(data.get("exportFcpxml", False)), bool(data.get("mlOnly", False)),
+        data.get("collectFrames"),
     ))
 
 
