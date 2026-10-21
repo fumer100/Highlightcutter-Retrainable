@@ -1,18 +1,5 @@
 {
   "games": {
-    "The Finals": {
-      "model_path": "models/THE FINALS/current.pt",
-      "dataset_path": "datasets/THE FINALS",
-      "review_queue_path": "review_queue/THE FINALS",
-      "classes": [
-        "event",
-        "hitmarker"
-      ],
-      "llm_context": {
-        "event": "Seltenes, starkes Signal - meist ein besonderer Moment (Teamwipe, Cashout, Highlight-Kill).",
-        "hitmarker": "Haeufiges, schwaches Signal - normaler Treffer im Kampf, allein meist kein Highlight."
-      }
-    },
     "Battlefield 6": {
       "model_path": "models/BF6/current.pt",
       "dataset_path": "datasets/BF6",
@@ -33,6 +20,38 @@
       ],
       "event_classes": [
         "Kill/Assist"
+      ],
+      "adaptive_thresholds": true
+    },
+    "The Finals": {
+      "model_path": "models/The Finals/current.pt",
+      "dataset_path": "datasets/The Finals",
+      "review_queue_path": "review_queue/The Finals",
+      "classes": [
+        "Kill",
+        "Assist",
+        "Hitmarker",
+        "Ingame Announcement",
+        "Cashout Started",
+        "Cashout Finished",
+        "Revive Progress",
+        "Getting Revived Progress",
+        "Stealing",
+        "Steal Finished",
+        "Revive"
+      ],
+      "event_classes": [
+        "Kill",
+        "Assist",
+        "Hitmarker",
+        "Ingame Announcement",
+        "Cashout Started",
+        "Cashout Finished",
+        "Revive Progress",
+        "Getting Revived Progress",
+        "Stealing",
+        "Steal Finished",
+        "Revive"
       ],
       "adaptive_thresholds": true
     }
