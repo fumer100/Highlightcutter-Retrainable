@@ -660,19 +660,39 @@ function renderVideoList() {
   const ul = document.getElementById("videoList");
   ul.innerHTML = "";
   state.videos.forEach((v, i) => {
+    const name = v.split(/[\\/]/).pop();
+
     const li = document.createElement("li");
-    const span = document.createElement("span");
-    span.textContent = v;
-    li.appendChild(span);
+    li.className = "video-item";
+    li.title = v;
+
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = name;
+    img.src = `/api/video_thumb?path=${encodeURIComponent(v)}`;
+    img.addEventListener("error", () => li.classList.add("no-thumb"));
+    li.appendChild(img);
+
+    const fallback = document.createElement("div");
+    fallback.className = "video-fallback";
+    fallback.textContent = "🎬";
+    li.appendChild(fallback);
+
+    const caption = document.createElement("div");
+    caption.className = "video-caption";
+    caption.textContent = name;
+    li.appendChild(caption);
 
     const rm = document.createElement("button");
     rm.textContent = "✕";
-    rm.className = "icon-btn small";
+    rm.className = "video-remove";
+    rm.title = "Aus der Liste entfernen";
     rm.addEventListener("click", () => {
       state.videos.splice(i, 1);
       renderVideoList();
     });
     li.appendChild(rm);
+
     ul.appendChild(li);
   });
 }
@@ -688,14 +708,22 @@ function updateSettingsHeader(customized) {
 }
 
 function renderSettings(schema) {
-  const body = document.getElementById("settingsBody");
-  body.innerHTML = "";
+  const lists = {
+    ml: document.getElementById("settingsListMl"),
+    cutter: document.getElementById("settingsListCutter"),
+  };
+  Object.values(lists).forEach((el) => { el.innerHTML = ""; });
   schema.forEach((item) => {
+    const body = lists[item.group] || lists.cutter;
     const row = document.createElement("div");
-    row.className = "setting-row";
+    row.className = item.type === "text" ? "setting-row wide" : "setting-row";
 
     const label = document.createElement("label");
-    label.textContent = item.label;
+    const labelText = document.createElement("span");
+    labelText.textContent = item.label;
+    label.appendChild(labelText);
+    const tipText = item.global ? `${item.desc} [gilt für alle Spiele]` : item.desc;
+    if (tipText) label.appendChild(makeInfoIcon(tipText));
     row.appendChild(label);
 
     let input;
@@ -726,12 +754,41 @@ function renderSettings(schema) {
     input.dataset.type = item.type;
     row.appendChild(input);
 
-    const desc = document.createElement("small");
-    desc.textContent = item.global ? `${item.desc} [gilt für alle Spiele]` : item.desc;
-    row.appendChild(desc);
-
     body.appendChild(row);
   });
+}
+
+// "i"-Symbol mit Hover-Tooltip (ein gemeinsames Tooltip-Element, damit es nie vom scrollbaren Bereich abgeschnitten wird)
+function makeInfoIcon(text) {
+  const icon = document.createElement("span");
+  icon.className = "info-icon";
+  icon.textContent = "i";
+  icon.tabIndex = 0;
+  icon.setAttribute("aria-label", text);
+  icon.addEventListener("mouseenter", () => showInfoTip(icon, text));
+  icon.addEventListener("mouseleave", hideInfoTip);
+  icon.addEventListener("focus", () => showInfoTip(icon, text));
+  icon.addEventListener("blur", hideInfoTip);
+  return icon;
+}
+
+function showInfoTip(anchor, text) {
+  const tip = document.getElementById("infoTip");
+  tip.textContent = text;
+  tip.classList.remove("hidden");
+  const a = anchor.getBoundingClientRect();
+  const t = tip.getBoundingClientRect();
+  const margin = 8;
+  let left = a.left + a.width / 2 - t.width / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - t.width - margin));
+  let top = a.bottom + 8;
+  if (top + t.height > window.innerHeight - margin) top = a.top - t.height - 8;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${Math.max(margin, top)}px`;
+}
+
+function hideInfoTip() {
+  document.getElementById("infoTip").classList.add("hidden");
 }
 
 function collectSettingsValues() {

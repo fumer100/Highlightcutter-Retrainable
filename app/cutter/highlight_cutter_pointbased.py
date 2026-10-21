@@ -175,6 +175,8 @@ class Config:
     ml_review_min_confidence: float = 0.25  # darunter wird verworfen, dazwischen Review Queue
     ml_max_review_per_video: int = 30  # max. Review-Bilder pro Video (0 = unbegrenzt)
     ml_collect_frames: int = 400  # Ziel-Anzahl Frames pro Lauf im Modus "Daten sammeln" (alles landet in der Review)
+    ml_fast_scan: bool = True  # "Daten sammeln": Schnell-Scan (Keyframes + dichte Pruefung nur um Treffer) statt ganzes Video
+    ml_decode_mode: str = "cpu"  # "Daten sammeln": Video-Dekodierung "cpu" (exakt) | "hybrid" (GPU + CPU) | "gpu" (nur GPU)
 
 
 def fmt_time(sec: float) -> str:
@@ -244,15 +246,20 @@ def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, ca
 
     def reader():
         frame_idx = 0
+        step = cfg.yolo_sample_every_n_frames
         try:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     break
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                if frame_idx % cfg.yolo_sample_every_n_frames == 0:
+                # Nicht benoetigte Frames nur dekodieren (grab), ohne sie in ein Bild umzuwandeln (retrieve):
+                # liefert dieselben Sample-Frames, ist aber ca. 3-4x schneller
+                if frame_idx % step == 0:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
                     frame_queue.put((frame_idx, frame))
+                elif not cap.grab():
+                    break
                 frame_idx += 1
         except Exception as e:
             reader_error["error"] = e

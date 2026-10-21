@@ -122,10 +122,12 @@ select {
 
 .grid {
   display: grid;
-  grid-template-columns: 1.1fr 1.4fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
   margin-bottom: 16px;
+  align-items: stretch;
 }
+.grid > .panel { margin-bottom: 0; }
 
 @media (max-width: 1100px) {
   .grid { grid-template-columns: 1fr; }
@@ -154,46 +156,145 @@ select {
 
 /* ---------------- Videos ---------------- */
 
+.videos-panel { display: flex; flex-direction: column; min-height: 0; }
+.videos-panel .panel-header { flex-wrap: wrap; gap: 8px; }
+.videos-panel .panel-actions .btn { padding: 6px 10px; font-size: 12.5px; }
+
+/* Die Liste fuellt die gesamte Panelhoehe (gleich hoch wie das Einstellungs-Panel) und scrollt intern */
 .video-list {
   list-style: none;
   margin: 0;
-  padding: 0;
-  max-height: 220px;
+  padding: 0 4px 0 0;
+  flex: 1 1 0;
+  min-height: 240px;
   overflow-y: auto;
+  overflow-x: hidden;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  grid-auto-rows: max-content;
+  gap: 8px;
+  color-scheme: dark;
+  scroll-snap-type: y proximity;
 }
-.video-list li {
+.video-list > .video-item { scroll-snap-align: start; }
+.video-list:empty { display: none; }
+.video-empty {
+  flex: 1 1 0;
+  min-height: 240px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 6px;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  border: 1px dashed var(--panel-border);
+  border-radius: 8px;
   background: var(--bg-alt);
-  margin-bottom: 6px;
-  font-size: 12px;
-  word-break: break-all;
 }
+.video-list:not(:empty) + .video-empty { display: none; }
+
+.video-item {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-alt);
+  border: 1px solid var(--panel-border);
+}
+.video-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.video-item.no-thumb img { display: none; }
+.video-item .video-fallback {
+  display: none;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  color: var(--text-dim);
+}
+.video-item.no-thumb .video-fallback { display: flex; }
+.video-item .video-caption {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 14px 6px 4px;
+  font-size: 11px;
+  line-height: 1.25;
+  color: #fff;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0));
+  word-break: break-all;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+.video-item:hover .video-caption,
+.video-item:focus-within .video-caption { opacity: 1; }
+.video-item .video-remove {
+  position: absolute;
+  top: 3px; right: 3px;
+  width: 20px; height: 20px;
+  padding: 0;
+  line-height: 18px;
+  font-size: 11px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.video-item:hover .video-remove,
+.video-item:focus-within .video-remove { opacity: 1; }
+.video-item .video-remove:hover { background: var(--danger); }
 
 /* ---------------- Settings ---------------- */
 
 .settings-body {
-  max-height: 360px;
-  overflow-y: auto;
-  transition: max-height 0.2s ease;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  margin-bottom: 12px;
 }
-.settings-body.collapsed { max-height: 0; overflow: hidden; }
+.settings-body.collapsed { display: none; }
+.settings-column { min-width: 0; }
+.settings-column-title {
+  margin: 0 0 4px;
+  padding-bottom: 6px;
+  font-size: 13.5px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.settings-list {
+  max-height: 480px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  color-scheme: dark;
+}
+@media (max-width: 1100px) {
+  .settings-body { grid-template-columns: 1fr; }
+}
 
 .setting-row {
   display: grid;
-  grid-template-columns: 230px 90px 1fr;
+  grid-template-columns: minmax(0, 1fr) 96px;
   align-items: center;
-  gap: 10px;
+  column-gap: 8px;
+  row-gap: 2px;
   padding: 5px 2px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
+.setting-row.wide { grid-template-columns: minmax(0, 1fr) 150px; }
+.setting-row input,
+.setting-row select { box-sizing: border-box; min-width: 0; }
 .setting-row label { font-size: 12.5px; font-weight: 600; }
 .setting-row input[type="number"] {
-  width: 90px;
+  width: 100%;
   background: var(--bg-alt);
   border: 1px solid var(--panel-border);
   color: var(--text);
@@ -202,15 +303,52 @@ select {
 }
 .setting-row input[type="text"],
 .setting-row select {
-  width: 140px;
+  width: 100%;
   background: var(--bg-alt);
   border: 1px solid var(--panel-border);
   color: var(--text);
   border-radius: 5px;
   padding: 4px 6px;
 }
-.setting-row input[type="checkbox"] { width: 18px; height: 18px; }
-.setting-row small { color: var(--text-dim); font-size: 11px; }
+.setting-row input[type="checkbox"] { width: 18px; height: 18px; justify-self: start; }
+.setting-row small { grid-column: 1 / -1; color: var(--text-dim); font-size: 11px; }
+
+.setting-row label { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.info-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: Georgia, serif;
+  cursor: help;
+  user-select: none;
+}
+.info-icon:hover,
+.info-icon:focus { color: #fff; border-color: var(--accent, #5b8cff); background: var(--accent, #5b8cff); outline: none; }
+
+.info-tip-popup {
+  position: fixed;
+  z-index: 200;
+  max-width: 360px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: #0b0d12;
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+.info-tip-popup.hidden { display: none; }
 
 /* ---------------- Actions / Progress ---------------- */
 

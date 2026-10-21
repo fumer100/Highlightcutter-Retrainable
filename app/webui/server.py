@@ -12,6 +12,7 @@ Server-Sent-Events statt der pywebview-JS-Bruecke.
 """
 
 import dataclasses
+import hashlib
 import json
 import os
 import queue
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -40,6 +42,7 @@ from app.core.pipeline_controller import (
 )
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
 from app.core.adaptive_thresholds import resolve_ml_params
+from app.core.fast_scan import collect_events
 from app.core.model_tester import test_model_on_video
 from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
@@ -104,6 +107,8 @@ SETTINGS_SCHEMA = [
     ("ml_review_min_confidence", "ML: Review ab Konfidenz", "float", "Zwischen diesem Wert und der Auto-Training-Schwelle landet ein Bild in der Review Queue, darunter (nichts erkannt) wird es verworfen. Gilt nicht bei automatischer Stufen-Schwelle"),
     ("ml_max_review_per_video", "ML: Max. Review-Bilder pro Video", "int", "Begrenzt die Review Queue pro Video auf die unsichersten Bilder (0 = unbegrenzt). Gilt nicht bei automatischer Stufen-Schwelle"),
     ("ml_collect_frames", "ML: Frames beim Daten sammeln", "int", "Ziel-Anzahl Frames pro Lauf von 'Daten sammeln' (auf alle gewaehlten Videos nach Laenge verteilt). Etwa die Haelfte stammt von Modell-Events, der Rest sind neue Frames. Alles landet in der Review Queue, nichts geht automatisch ins Training"),
+    ("ml_fast_scan", "ML: Schnell-Scan beim Daten sammeln", "bool", "An: das Video wird in gleichmaessig verteilten 30-s-Abschnitten geprueft und der Scan stoppt, sobald genug Events fuer die Frame-Anzahl gefunden sind (deutlich schneller). Aus: das ganze Video wird geprueft"),
+    ("ml_decode_mode", "ML: Video-Dekodierung beim Daten sammeln", "choice", "cpu = wie bisher (exakt); hybrid = GPU (NVDEC) und CPU gleichzeitig, ca. 2,5x schneller; gpu = nur GPU, die CPU bleibt fuer Spiel/OBS frei, ca. 2,4x schneller. GPU-Modi verkleinern die Frames auf der GPU und finden dadurch ca. 90 % der Events, die der CPU-Modus findet (leicht andere Auswahl). Ist die GPU nicht nutzbar, wird automatisch die CPU genutzt"),
     ("ml_event_group_gap_sec", "ML: Event-Zusammenfassung (s)", "float", "Erkennungen mit kleinerem zeitlichen Abstand gelten als ein Event"),
     ("ml_frames_per_event", "ML: Frames pro Event", "int", "Wie viele Frames pro Event extrahiert werden"),
     ("ml_duplicate_threshold", "ML: Duplikat-Schwelle", "float", "Frames, die einem schon gespeicherten Frame so aehnlich sind (mittlere Grauwert-Abweichung 0-255), werden uebersprungen"),
@@ -119,7 +124,40 @@ CHOICE_OPTIONS = {
     "scoring_mode": ["legacy", "llm"],
     "llm_provider": ["ollama", "openai"],
     "whisper_model_size": ["tiny", "base", "small", "medium", "large-v3"],
+    "ml_decode_mode": ["cpu", "hybrid", "gpu"],
 }
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".flv", ".ts"}
+THUMB_DIR = Path(tempfile.gettempdir()) / "highlight_cutter_thumbs"
+THUMB_WIDTH = 320
+
+
+def make_video_thumbnail(video_path: str):
+    """Gibt den Pfad zu einem JPEG-Vorschaubild des Videos zurueck (None, falls keins erzeugt werden kann)."""
+    try:
+        src = Path(video_path)
+        if src.suffix.lower() not in VIDEO_EXTENSIONS or not src.is_file():
+            return None
+        stat = src.stat()
+        key = hashlib.sha1(f"{src.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")).hexdigest()
+        thumb = THUMB_DIR / f"{key}.jpg"
+        if thumb.is_file() and thumb.stat().st_size > 0:
+            return thumb
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = THUMB_DIR / f"{key}.{threading.get_ident()}.tmp.jpg"
+        # erst ein Bild nach 5 s (vermeidet schwarze Intro-Frames), bei sehr kurzen Videos vom Anfang
+        for offset in ("5", "0"):
+            cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y", "-ss", offset, "-i", str(src),
+                   "-frames:v", "1", "-vf", f"scale={THUMB_WIDTH}:-2", "-q:v", "4", str(tmp)]
+            subprocess.run(cmd, capture_output=True, timeout=60)
+            if tmp.is_file() and tmp.stat().st_size > 0:
+                os.replace(tmp, thumb)
+                return thumb
+        tmp.unlink(missing_ok=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
 
 
 MAX_COLLECT_FRAMES = 5000  # Obergrenze fuer 'Daten sammeln' (Schutz vor Tippfehlern)
@@ -142,10 +180,14 @@ def _add_ml_stats(totals: dict, stats: dict):
         totals["conf_buckets"][label] = totals["conf_buckets"].get(label, 0) + n
 
 
-def _build_collect_report(totals: dict, cfg: Config, target: int, detect_conf: float) -> dict:
+def _build_collect_report(totals: dict, cfg: Config, target: int, detect_conf: float, scan_notes=None) -> dict:
     rows = [
         ("Modus", "Daten sammeln", "alles kommt in die Review Queue, nichts geht automatisch ins Training"),
         ("Ziel-Frames", target, f"Einstellung 'ML: Frames beim Daten sammeln'"),
+    ]
+    for note in (scan_notes or []):
+        rows.append(("Scan", "", note))
+    rows += [
         ("Erkennungen im Video", totals["events"], f"Event-Erkennung ab Konfidenz {detect_conf:.2f}"),
         ("Zusammengefasste Events", totals["groups"], f"Treffer < {cfg.ml_event_group_gap_sec:g}s Abstand = 1 Event"),
         ("In der Review gelandet", totals["review"], f"{totals['review']} von {target} Ziel-Frames"),
@@ -319,7 +361,8 @@ class Core:
     def _settings_schema(self):
         return [
             {"attr": a, "label": l, "type": t, "desc": d, "value": getattr(self.cfg, a),
-             "options": CHOICE_OPTIONS.get(a), "global": a in GLOBAL_SETTINGS}
+             "options": CHOICE_OPTIONS.get(a), "global": a in GLOBAL_SETTINGS,
+             "group": "ml" if a.startswith("ml_") else "cutter"}
             for (a, l, t, d) in SETTINGS_SCHEMA
         ]
 
@@ -828,6 +871,7 @@ class Core:
                 # Daten sammeln: festes Frame-Ziel, nach Videolaenge auf die Videos verteilt
                 target = max(1, int(self.cfg.ml_collect_frames))
                 quotas = split_quota([video_duration(v) for v in video_paths], target)
+                scan_notes: list[str] = []
                 collect_conf = min(self.cfg.yolo_confidence, COLLECT_MIN_CONFIDENCE)
                 print(f"[ML] Daten sammeln: Ziel {target} Frames (je ca. {COLLECT_EVENT_SHARE:.0%} von Events und "
                       f"neue Frames), Event-Erkennung und Vorlabels ab {collect_conf:.2f}, alles in die Review")
@@ -858,12 +902,40 @@ class Core:
                     if quotas[idx - 1] <= 0:
                         print(f"[ML] {os.path.basename(video)}: Laenge unbekannt/zu kurz, uebersprungen.")
                     else:
-                        detect_cfg = dataclasses.replace(self.cfg, yolo_confidence=collect_conf)
-                        events = sorted(preload_yolo_events(video, detect_cfg, progress_cb, cancel_event))
+                        quota = quotas[idx - 1]
+                        decode_mode = self.cfg.ml_decode_mode
+                        if self.cfg.ml_fast_scan or decode_mode != "cpu":
+                            # Stichproben-Scan: stoppt, sobald genug Events fuer die Event-Haelfte gefunden sind.
+                            # Ohne Schnell-Scan wird das ganze Video geprueft (need=None), ggf. auf der GPU.
+                            need = int(quota * COLLECT_EVENT_SHARE * 1.5) + 5 if self.cfg.ml_fast_scan else None
+                            scan = collect_events(
+                                video, self.cfg.yolo_model_path, collect_conf, self.cfg.yolo_target_classes,
+                                every_n=self.cfg.yolo_sample_every_n_frames, need_groups=need,
+                                group_gap_sec=self.cfg.ml_event_group_gap_sec, decode_mode=decode_mode,
+                                progress_callback=progress_cb, cancel_event=cancel_event,
+                            )
+                            events = scan["events"]
+                            used = {"cpu": "CPU", "hybrid": "GPU + CPU", "gpu": "GPU"}[scan["decode_mode"]]
+                            if scan["decode_mode"] != "cpu":
+                                used += f" ({scan['gpu_chunks']} Abschnitte GPU, {scan['cpu_chunks']} CPU)"
+                            if scan.get("gpu_failed"):
+                                used += ", GPU ausgefallen -> CPU"
+                            note = (f"{os.path.basename(video)}: {scan['scanned_sec']:.0f}s von {scan['duration']:.0f}s geprueft "
+                                    f"({scan['windows_done']}/{scan['chunks_total']} Abschnitte, {scan['seconds']:.0f}s Scan-Zeit, "
+                                    f"Dekodierung: {used}"
+                                    + (", gestoppt: genug Events" if scan["stopped_early"] else ", ganzes Video") + ")")
+                            if scan["decode_note"]:
+                                note += f" | {scan['decode_note']}"
+                            scan_notes.append(note)
+                            print(f"[ML] Scan: {note}")
+                        else:
+                            detect_cfg = dataclasses.replace(self.cfg, yolo_confidence=collect_conf)
+                            events = sorted(preload_yolo_events(video, detect_cfg, progress_cb, cancel_event))
+                            scan_notes.append(f"{os.path.basename(video)}: ganzes Video geprueft (Schnell-Scan aus)")
                         stats = self._pc().run_collect_cycle(
                             video_path=video,
                             events=events,
-                            quota=quotas[idx - 1],
+                            quota=quota,
                             event_group_gap_sec=self.cfg.ml_event_group_gap_sec,
                             frames_per_event=self.cfg.ml_frames_per_event,
                             duplicate_threshold=self.cfg.ml_duplicate_threshold,
@@ -907,7 +979,7 @@ class Core:
                 self._push("overallProgress", {"idx": idx, "total": total})
 
             if ml_only:
-                report = _build_collect_report(totals, self.cfg, target, collect_conf)
+                report = _build_collect_report(totals, self.cfg, target, collect_conf, scan_notes)
                 message = (
                     f"Daten sammeln fertig: {totals['review']} Frames in der Review Queue "
                     f"({totals['prelabeled']} mit Vorlabel, {totals['review_empty']} ohne). "
@@ -1266,6 +1338,18 @@ def api_apply_settings():
 @app.route("/api/reset_settings", methods=["POST"])
 def api_reset_settings():
     return jsonify(core.reset_settings())
+
+
+@app.route("/api/video_thumb")
+def api_video_thumb():
+    """Vorschaubild fuer ein ausgewaehltes Video (erzeugt per ffmpeg, danach aus dem Cache)."""
+    path = request.args.get("path", "")
+    thumb = make_video_thumbnail(path)
+    if thumb is None:
+        abort(404)
+    resp = send_file(thumb, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "private, max-age=86400"
+    return resp
 
 
 @app.route("/api/pick_files", methods=["POST"])

@@ -8,6 +8,8 @@
 </head>
 <body>
 
+<div id="infoTip" class="info-tip-popup hidden" role="tooltip"></div>
+
 <div id="toastContainer" class="toast-container"></div>
 
 <header class="topbar">
@@ -28,11 +30,12 @@
       <div class="panel-header">
         <h2>Videos</h2>
         <div class="panel-actions">
-          <button id="selectVideosBtn" class="btn">Videos auswählen</button>
-          <button id="clearVideosBtn" class="btn btn-outline">Liste leeren</button>
+          <button id="selectVideosBtn" class="btn">Auswählen</button>
+          <button id="clearVideosBtn" class="btn btn-outline">Leeren</button>
         </div>
       </div>
       <ul id="videoList" class="video-list"></ul>
+      <div id="videoEmpty" class="video-empty">Noch keine Videos ausgewählt.</div>
     </section>
 
     <section class="panel settings-panel">
@@ -40,7 +43,16 @@
         <h2>Einstellungen<span id="settingsGameLabel"></span></h2>
         <span class="chevron">▾</span>
       </div>
-      <div id="settingsBody" class="settings-body"></div>
+      <div id="settingsBody" class="settings-body">
+        <div class="settings-column">
+          <h3 class="settings-column-title">🧠 ML-Einstellungen</h3>
+          <div id="settingsListMl" class="settings-list"></div>
+        </div>
+        <div class="settings-column">
+          <h3 class="settings-column-title">✂️ Cutter-Einstellungen</h3>
+          <div id="settingsListCutter" class="settings-list"></div>
+        </div>
+      </div>
       <div class="panel-actions">
         <button id="applySettingsBtn" class="btn">Übernehmen</button>
         <button id="resetSettingsBtn" class="btn btn-outline">Zurücksetzen</button>

@@ -1,3 +1,10 @@
 {
-  "games": {}
+  "games": {
+    "The Finals": {
+      "ml_collect_frames": 600
+    },
+    "Wardogs": {
+      "ml_collect_frames": 600
+    }
+  }
 }
