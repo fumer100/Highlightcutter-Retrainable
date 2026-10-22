@@ -1227,6 +1227,95 @@ class Core:
         path = self._dm().review_images / f"{sample_id}.jpg"
         return path if path.is_file() else None
 
+    # ------------------------------------------------------------
+    # Dataset-Ansicht (nur lesen): train/val-Bilder samt Labels
+    # ------------------------------------------------------------
+
+    _DATASET_SPLITS = ("train", "val")
+
+    @staticmethod
+    def _read_label_boxes(label_file: Path) -> list:
+        """Liest eine YOLO-Label-Datei; ungueltige Zeilen werden uebersprungen."""
+        boxes = []
+        try:
+            text = label_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return boxes
+        for line in text.splitlines():
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            try:
+                cls = int(float(parts[0]))
+                x, y, w, h = (float(v) for v in parts[1:5])
+            except ValueError:
+                continue
+            boxes.append({"cls": cls, "x": x, "y": y, "w": w, "h": h})
+        return boxes
+
+    def _dataset_dirs(self, split: str):
+        dm = self._dm()
+        if split == "train":
+            return dm.train_images, dm.train_labels
+        if split == "val":
+            return dm.val_images, dm.val_labels
+        return None, None
+
+    def dataset_list(self):
+        if not self.current_game:
+            return {"ok": False, "error": "Kein Spiel ausgewaehlt."}
+        dm = self._dm()
+        items = []
+        per_class: dict[int, int] = {}
+        counts = {"train": 0, "val": 0}
+        for split in self._DATASET_SPLITS:
+            img_dir, lbl_dir = self._dataset_dirs(split)
+            for img in img_dir.glob("*.jpg"):
+                boxes = self._read_label_boxes(lbl_dir / f"{img.stem}.txt")
+                classes = sorted({b["cls"] for b in boxes})
+                for b in boxes:
+                    per_class[b["cls"]] = per_class.get(b["cls"], 0) + 1
+                items.append({"id": img.stem, "split": split, "n": len(boxes), "cls": classes})
+                counts[split] += 1
+        items.sort(key=lambda it: it["id"])
+        return {
+            "ok": True,
+            "game": dm.game.name,
+            "classes": dm.game.classes,
+            "items": items,
+            "counts": counts,
+            "boxesPerClass": {str(k): v for k, v in sorted(per_class.items())},
+        }
+
+    def dataset_image_path(self, split: str, sample_id: str):
+        if split not in self._DATASET_SPLITS or not self._SAMPLE_ID_RE.match(sample_id or ""):
+            return None
+        img_dir, _ = self._dataset_dirs(split)
+        path = img_dir / f"{sample_id}.jpg"
+        return path if path.is_file() else None
+
+    def dataset_labels(self, split: str, sample_id: str):
+        if self.dataset_image_path(split, sample_id) is None:
+            return {"ok": False, "error": "Bild nicht gefunden."}
+        _, lbl_dir = self._dataset_dirs(split)
+        result = {"ok": True, "boxes": self._read_label_boxes(lbl_dir / f"{sample_id}.txt"), "meta": None}
+
+        # Herkunft (Video/Zeitpunkt/Konfidenz) steht in den Metadaten, die beim Review-Ordner liegen bleiben
+        meta_file = self._dm().review_metadata / f"{sample_id}.json"
+        if meta_file.is_file():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                result["meta"] = {
+                    "video": meta.get("video_name") or None,
+                    "timestampSec": meta.get("timestamp_sec") or None,
+                    "frame": meta.get("frame_number"),
+                    "confidence": meta.get("confidence"),
+                    "modelVersion": meta.get("model_version") or None,
+                }
+            except (OSError, ValueError):
+                pass
+        return result
+
     def review_get_labels(self, sample_id: str):
         dm = self._dm()
         label_file = dm.review_labels / f"{sample_id}.txt"
@@ -1467,6 +1556,24 @@ def api_review_image(sample_id):
     if p is None or not p.exists():
         abort(404)
     return send_file(p)
+
+
+@app.route("/api/dataset/list")
+def api_dataset_list():
+    return jsonify(core.dataset_list())
+
+
+@app.route("/api/dataset/image/<split>/<sample_id>")
+def api_dataset_image(split, sample_id):
+    p = core.dataset_image_path(split, sample_id)
+    if p is None:
+        abort(404)
+    return send_file(p, max_age=0)
+
+
+@app.route("/api/dataset/labels/<split>/<sample_id>")
+def api_dataset_labels(split, sample_id):
+    return jsonify(core.dataset_labels(split, sample_id))
 
 
 @app.route("/api/review/labels/<sample_id>")

@@ -87,6 +87,7 @@
       <button id="trainBtn" class="btn btn-info">🧠 Train Model</button>
       <button id="cancelBtn" class="btn btn-danger" disabled>■ Abbrechen</button>
       <button id="reviewBtn" class="btn btn-warning">🧾 Review Queue (0)</button>
+      <button id="datasetBtn" class="btn btn-outline" title="Alle Trainings- und Validierungsbilder dieses Spiels ansehen (nur lesen)">🗂 Dataset (0)</button>
     </div>
 
     <div class="progress-block">
@@ -129,6 +130,45 @@
   <div class="review-canvas-wrap">
     <canvas id="reviewCanvas" width="1000" height="600"></canvas>
   </div>
+</main>
+
+<main id="datasetView" class="view hidden">
+  <div class="review-toolbar">
+    <button id="datasetBackBtn" class="btn btn-outline">← Zurück</button>
+    <div class="dataset-title">🗂 Dataset <span id="datasetGame"></span> <span class="readonly-badge">Nur Ansicht</span></div>
+    <div id="datasetCounter" class="review-counter">Bild 0 / 0</div>
+    <div class="dataset-filters">
+      <label>Datensatz
+        <select id="datasetSplit">
+          <option value="all">Train + Val</option>
+          <option value="train">nur Train</option>
+          <option value="val">nur Val</option>
+        </select>
+      </label>
+      <label>Klasse
+        <select id="datasetClass"><option value="all">alle</option></select>
+      </label>
+      <label>Boxen
+        <select id="datasetBoxes">
+          <option value="all">alle Bilder</option>
+          <option value="with">nur mit Boxen</option>
+          <option value="without">nur ohne Boxen</option>
+        </select>
+      </label>
+    </div>
+    <div class="review-actions">
+      <label class="dataset-jump">Springe zu <input type="number" id="datasetJump" min="1" step="1"></label>
+      <button id="datasetFirstBtn" class="btn btn-outline" title="Erstes Bild (Pos1)">⏮</button>
+      <button id="datasetPrevBtn" class="btn btn-outline">◀ Prev</button>
+      <button id="datasetNextBtn" class="btn btn-outline">Next ▶</button>
+      <button id="datasetLastBtn" class="btn btn-outline" title="Letztes Bild (Ende)">⏭</button>
+    </div>
+  </div>
+  <div id="datasetLegend" class="dataset-legend"></div>
+  <div class="review-canvas-wrap">
+    <canvas id="datasetCanvas" width="1000" height="563"></canvas>
+  </div>
+  <div id="datasetInfo" class="dataset-info"></div>
 </main>
 
 <div id="addGameModal" class="modal hidden">

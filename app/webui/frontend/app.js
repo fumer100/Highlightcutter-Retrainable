@@ -84,6 +84,7 @@ function applyState(s) {
   syncCollectFrames();
   updateSettingsHeader(s.settingsCustomized);
   updateReviewBadge(s.reviewCount);
+  updateDatasetBadge();
   renderBootstrapBanner();
   updateActionButtons();
 }
@@ -168,8 +169,10 @@ function connectEvents() {
 function bindEvents() {
   document.getElementById("gameDropdown").addEventListener("change", async (e) => {
     const res = await apiPost("/api/select_game", { name: e.target.value });
-    if (res.ok) applyState(res.state);
-    else { showToast(res.error, "error"); renderGameDropdown(); }
+    if (res.ok) {
+      applyState(res.state);
+      if (datasetViewVisible()) openDataset(); // Dataset-Ansicht zeigt sonst noch das vorherige Spiel
+    } else { showToast(res.error, "error"); renderGameDropdown(); }
   });
 
   document.getElementById("refreshGamesBtn").addEventListener("click", async () => {
@@ -375,6 +378,21 @@ function bindEvents() {
 
   document.getElementById("reviewBtn").addEventListener("click", openReview);
   document.getElementById("backToMainBtn").addEventListener("click", showMainView);
+
+  document.getElementById("datasetBtn").addEventListener("click", openDataset);
+  document.getElementById("datasetBackBtn").addEventListener("click", showMainView);
+  ["datasetSplit", "datasetClass", "datasetBoxes"].forEach((id) =>
+    document.getElementById(id).addEventListener("change", () => applyDatasetFilters(true)));
+  document.getElementById("datasetPrevBtn").addEventListener("click", () => datasetGo(dataset.index - 1));
+  document.getElementById("datasetNextBtn").addEventListener("click", () => datasetGo(dataset.index + 1));
+  document.getElementById("datasetFirstBtn").addEventListener("click", () => datasetGo(0));
+  document.getElementById("datasetLastBtn").addEventListener("click", () => datasetGo(dataset.items.length - 1));
+  document.getElementById("datasetJump").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const n = parseInt(e.target.value, 10);
+    if (Number.isInteger(n)) datasetGo(n - 1);
+  });
+  document.addEventListener("keydown", onDatasetKeyDown);
 
   document.getElementById("acceptBtn").addEventListener("click", acceptCurrent);
   document.getElementById("rejectBtn").addEventListener("click", rejectCurrent);
@@ -893,8 +911,197 @@ function showReviewView() {
 
 function showMainView() {
   document.getElementById("reviewView").classList.add("hidden");
+  document.getElementById("datasetView").classList.add("hidden");
   document.getElementById("mainView").classList.remove("hidden");
   refreshState();
+}
+
+// ------------------------------------------------------------
+// Dataset-Ansicht (nur lesen): alle Train-/Val-Bilder mit ihren Boxen
+// ------------------------------------------------------------
+
+const dsCanvas = document.getElementById("datasetCanvas");
+const dsCtx = dsCanvas.getContext("2d");
+const dataset = { all: [], items: [], index: 0, classes: [], boxesPerClass: {}, loadToken: 0, preload: new Image() };
+
+function datasetViewVisible() {
+  return !document.getElementById("datasetView").classList.contains("hidden");
+}
+
+function updateDatasetBadge() {
+  const st = state.datasetStats || {};
+  const total = (st.train ?? 0) + (st.val ?? 0);
+  document.getElementById("datasetBtn").textContent = `🗂 Dataset (${total})`;
+}
+
+async function openDataset() {
+  if (!state.currentGame) { showToast("Kein Spiel ausgewählt.", "warn"); return; }
+  const res = await apiGet("/api/dataset/list");
+  if (!res.ok) { showToast(res.error || "Dataset konnte nicht geladen werden.", "error"); return; }
+
+  dataset.all = res.items;
+  dataset.classes = res.classes;
+  dataset.boxesPerClass = res.boxesPerClass;
+  document.getElementById("datasetGame").textContent = `– ${res.game}`;
+
+  const classSel = document.getElementById("datasetClass");
+  classSel.innerHTML = '<option value="all">alle</option>';
+  res.classes.forEach((name, i) => {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${i + 1}: ${name}`;
+    classSel.appendChild(opt);
+  });
+  document.getElementById("datasetSplit").value = "all";
+  document.getElementById("datasetBoxes").value = "all";
+
+  renderDatasetLegend(res.counts);
+  document.getElementById("mainView").classList.add("hidden");
+  document.getElementById("reviewView").classList.add("hidden");
+  document.getElementById("datasetView").classList.remove("hidden");
+  applyDatasetFilters(false);
+}
+
+function renderDatasetLegend(counts) {
+  const box = document.getElementById("datasetLegend");
+  box.innerHTML = "";
+  const addChip = (text, small, color) => {
+    const chip = document.createElement("span");
+    chip.className = "legend-chip";
+    chip.style.background = color;
+    chip.textContent = text + " ";
+    const s = document.createElement("small");
+    s.textContent = small;
+    chip.appendChild(s);
+    box.appendChild(chip);
+  };
+  addChip("Train", `${counts.train} Bilder`, "#3a4256");
+  addChip("Val", `${counts.val} Bilder`, "#3a4256");
+  const ids = new Set(dataset.classes.map((_, i) => String(i)));
+  Object.keys(dataset.boxesPerClass).forEach((k) => ids.add(k));
+  [...ids].sort((a, b) => Number(a) - Number(b)).forEach((k) => {
+    const i = Number(k);
+    addChip(`${i + 1}: ${dataset.classes[i] ?? `cls${i}`}`, `${dataset.boxesPerClass[k] ?? 0} Boxen`, classColor(i));
+  });
+}
+
+function applyDatasetFilters(keepCurrent = true) {
+  const split = document.getElementById("datasetSplit").value;
+  const cls = document.getElementById("datasetClass").value;
+  const boxes = document.getElementById("datasetBoxes").value;
+  const currentId = keepCurrent ? dataset.items[dataset.index]?.id : null;
+
+  dataset.items = dataset.all.filter((it) =>
+    (split === "all" || it.split === split) &&
+    (cls === "all" || it.cls.includes(Number(cls))) &&
+    (boxes === "all" || (boxes === "with" ? it.n > 0 : it.n === 0)));
+
+  const keep = currentId ? dataset.items.findIndex((it) => it.id === currentId) : -1;
+  dataset.index = keep >= 0 ? keep : 0;
+  document.getElementById("datasetJump").max = String(Math.max(1, dataset.items.length));
+  loadDatasetImage();
+}
+
+function datasetGo(index) {
+  if (!dataset.items.length) return;
+  dataset.index = Math.max(0, Math.min(dataset.items.length - 1, index));
+  loadDatasetImage();
+}
+
+function formatClock(sec) {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function drawDatasetMessage(text) {
+  dsCanvas.width = 1000;
+  dsCanvas.height = 563;
+  dsCtx.fillStyle = "#000";
+  dsCtx.fillRect(0, 0, dsCanvas.width, dsCanvas.height);
+  dsCtx.fillStyle = "#fff";
+  dsCtx.font = "22px sans-serif";
+  dsCtx.textAlign = "center";
+  dsCtx.fillText(text, dsCanvas.width / 2, dsCanvas.height / 2);
+}
+
+function drawDatasetBoxes(boxes) {
+  const W = dsCanvas.width, H = dsCanvas.height;
+  dsCtx.font = "bold 13px sans-serif";
+  dsCtx.textAlign = "left";
+  dsCtx.textBaseline = "alphabetic";
+  boxes.forEach((b) => {
+    const x = b.x * W, y = b.y * H, w = b.w * W, h = b.h * H;
+    const color = classColor(b.cls);
+    dsCtx.strokeStyle = color;
+    dsCtx.lineWidth = 2;
+    dsCtx.strokeRect(x - w / 2, y - h / 2, w, h);
+
+    const text = dataset.classes[b.cls] ?? `cls${b.cls}`;
+    const tw = dsCtx.measureText(text).width + 8;
+    const ty = Math.max(16, y - h / 2);
+    dsCtx.fillStyle = color;
+    dsCtx.fillRect(x - w / 2, ty - 16, tw, 16);
+    dsCtx.fillStyle = "#fff";
+    dsCtx.fillText(text, x - w / 2 + 4, ty - 4);
+  });
+}
+
+async function loadDatasetImage() {
+  const total = dataset.items.length;
+  const entry = dataset.items[dataset.index];
+  document.getElementById("datasetCounter").textContent = `Bild ${total ? dataset.index + 1 : 0} / ${total}`;
+  document.getElementById("datasetJump").value = total ? dataset.index + 1 : "";
+
+  const info = document.getElementById("datasetInfo");
+  if (!entry) {
+    drawDatasetMessage(dataset.all.length ? "Keine Bilder für diesen Filter" : "Dieses Spiel hat noch keine Trainingsbilder");
+    info.textContent = "";
+    return;
+  }
+
+  const token = ++dataset.loadToken;
+  const base = `${entry.split}/${encodeURIComponent(entry.id)}`;
+  const img = new Image();
+  const imgLoaded = new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; });
+  img.src = `/api/dataset/image/${base}`;
+  const [labels] = await Promise.all([apiGet(`/api/dataset/labels/${base}`), imgLoaded.catch(() => null)]);
+  if (token !== dataset.loadToken) return; // zwischenzeitlich weitergeblaettert
+
+  if (!img.naturalWidth) {
+    drawDatasetMessage("Bild konnte nicht geladen werden");
+    info.textContent = entry.id;
+    return;
+  }
+  dsCanvas.width = 1000;
+  dsCanvas.height = Math.round(1000 * img.naturalHeight / img.naturalWidth);
+  dsCtx.drawImage(img, 0, 0, dsCanvas.width, dsCanvas.height);
+  const boxes = labels.ok ? labels.boxes : [];
+  drawDatasetBoxes(boxes);
+
+  const lines = [`${entry.id}  ·  ${entry.split === "train" ? "Train" : "Val"}  ·  ${boxes.length} ${boxes.length === 1 ? "Box" : "Boxen"}`];
+  const m = labels.ok ? labels.meta : null;
+  if (m) {
+    const parts = [];
+    if (m.video) parts.push(`Video: ${m.video}`);
+    if (m.timestampSec) parts.push(`bei ${formatClock(m.timestampSec)}`);
+    if (typeof m.confidence === "number" && m.confidence > 0) parts.push(`Modell-Konfidenz ${m.confidence.toFixed(2)}`);
+    if (parts.length) lines.push(parts.join("  ·  "));
+  }
+  info.textContent = lines.join("\n");
+
+  // naechstes Bild schon vorladen, damit das Blaettern flott bleibt
+  const next = dataset.items[dataset.index + 1];
+  if (next) dataset.preload.src = `/api/dataset/image/${next.split}/${encodeURIComponent(next.id)}`;
+}
+
+function onDatasetKeyDown(e) {
+  if (!datasetViewVisible()) return;
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
+  if (e.key === "ArrowRight") { datasetGo(dataset.index + 1); e.preventDefault(); }
+  else if (e.key === "ArrowLeft") { datasetGo(dataset.index - 1); e.preventDefault(); }
+  else if (e.key === "Home") { datasetGo(0); e.preventDefault(); }
+  else if (e.key === "End") { datasetGo(dataset.items.length - 1); e.preventDefault(); }
+  else if (e.key === "Escape") showMainView();
 }
 
 // ------------------------------------------------------------
