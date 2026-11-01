@@ -8,6 +8,20 @@
 </head>
 <body>
 
+<div id="timelineNamesModal" class="modal hidden">
+  <div class="modal-content timelines-modal">
+    <h2>🎬 Timelines benennen</h2>
+    <p class="modal-hint">Dateiname je Video, ohne Endung. Er gilt für die FCPXML und ihre Log-Dateien und ist auch der Timeline-Name in DaVinci Resolve.</p>
+    <div id="timelineNamesList" class="timeline-names-list"></div>
+    <div class="modal-actions">
+      <button id="timelineNamesDefaultBtn" class="btn btn-outline" title="Alle Namen auf das Standardformat zurücksetzen">Standardnamen</button>
+      <span class="modal-spacer"></span>
+      <button id="timelineNamesCancelBtn" class="btn btn-outline">Abbrechen</button>
+      <button id="timelineNamesStartBtn" class="btn btn-primary">Starten</button>
+    </div>
+  </div>
+</div>
+
 <div id="infoTip" class="info-tip-popup hidden" role="tooltip"></div>
 
 <div id="toastContainer" class="toast-container"></div>
@@ -135,7 +149,10 @@
 <main id="datasetView" class="view hidden">
   <div class="review-toolbar">
     <button id="datasetBackBtn" class="btn btn-outline">← Zurück</button>
-    <div class="dataset-title">🗂 Dataset <span id="datasetGame"></span> <span class="readonly-badge">Nur Ansicht</span></div>
+    <div class="dataset-title">🗂 Dataset <span id="datasetGame"></span> <span id="datasetModeBadge" class="readonly-badge">Nur Ansicht</span></div>
+    <label class="dataset-edit-toggle" title="Boxen zeichnen/verschieben/umlabeln und Bilder löschen">
+      <input type="checkbox" id="datasetEditToggle"> ✏️ Bearbeiten
+    </label>
     <div id="datasetCounter" class="review-counter">Bild 0 / 0</div>
     <div class="dataset-filters">
       <label>Datensatz
@@ -162,6 +179,13 @@
       <button id="datasetPrevBtn" class="btn btn-outline">◀ Prev</button>
       <button id="datasetNextBtn" class="btn btn-outline">Next ▶</button>
       <button id="datasetLastBtn" class="btn btn-outline" title="Letztes Bild (Ende)">⏭</button>
+    </div>
+  </div>
+  <div id="datasetEditBar" class="review-toolbar hidden">
+    <div id="datasetClassButtons" class="class-buttons"></div>
+    <div class="review-actions">
+      <button id="datasetDeleteBoxBtn" class="btn btn-outline">Delete Box (Del)</button>
+      <button id="datasetDeleteImageBtn" class="btn btn-danger">🗑 Bild löschen</button>
     </div>
   </div>
   <div id="datasetLegend" class="dataset-legend"></div>

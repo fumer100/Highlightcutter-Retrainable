@@ -313,18 +313,19 @@ function bindEvents() {
     if (res.customized !== null && res.customized !== undefined) updateSettingsHeader(res.customized);
   });
 
-  document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", async () => {
-    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
-    setBusy(true);
-    const res = await apiPost("/api/run_ml_pipeline", { videos: state.videos, exportFcpxml: true });
-    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
-  });
+  // FCPXML-Prozesse starten erst nach dem Benennen im Popup
+  document.getElementById("mlPipelineFcpxmlBtn").addEventListener("click", () => openTimelineNamesModal("ml"));
+  document.getElementById("exportFcpxmlBtn").addEventListener("click", () => openTimelineNamesModal("export"));
 
-  document.getElementById("exportFcpxmlBtn").addEventListener("click", async () => {
-    if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
-    setBusy(true);
-    const res = await apiPost("/api/export_fcpxml", { videos: state.videos });
-    if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+  document.getElementById("timelineNamesStartBtn").addEventListener("click", startFcpxmlWithNames);
+  document.getElementById("timelineNamesCancelBtn").addEventListener("click", closeTimelineNamesModal);
+  document.getElementById("timelineNamesDefaultBtn").addEventListener("click", () => {
+    document.querySelectorAll("#timelineNamesList .tn-input").forEach((inp, i) => { inp.value = tnState.defaults[i] ?? ""; });
+    refreshTimelineNameNotes();
+  });
+  document.getElementById("timelineNamesModal").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeTimelineNamesModal();
+    else if (e.key === "Enter" && e.target.classList.contains("tn-input")) { e.preventDefault(); startFcpxmlWithNames(); }
   });
 
   document.getElementById("testModelBtn").addEventListener("click", openTestModelModal);
@@ -393,6 +394,12 @@ function bindEvents() {
     if (Number.isInteger(n)) datasetGo(n - 1);
   });
   document.addEventListener("keydown", onDatasetKeyDown);
+  document.getElementById("datasetEditToggle").addEventListener("change", (e) => {
+    e.target.blur(); // sonst schlucken die Tastenkuerzel (Pfeile, Entf, 1-9) den Fokus der Checkbox
+    setDatasetEditing(e.target.checked);
+  });
+  document.getElementById("datasetDeleteBoxBtn").addEventListener("click", deleteSelectedBox);
+  document.getElementById("datasetDeleteImageBtn").addEventListener("click", deleteDatasetImage);
 
   document.getElementById("acceptBtn").addEventListener("click", acceptCurrent);
   document.getElementById("rejectBtn").addEventListener("click", rejectCurrent);
@@ -716,6 +723,108 @@ function renderVideoList() {
 }
 
 // ------------------------------------------------------------
+// Popup "Timelines benennen": ein Eingabefeld pro Video, vorbelegt mit dem Standard-Namensformat
+// ------------------------------------------------------------
+
+const tnState = { kind: null, videos: [], defaults: [], timer: null, token: 0 };
+
+async function openTimelineNamesModal(kind) {
+  if (state.busy) return;
+  if (!state.videos.length) { showToast("Keine Videos ausgewählt.", "warn"); return; }
+
+  const videos = [...state.videos];
+  const res = await apiPost("/api/timeline_names", { videos });
+  if (!res.ok) { showToast(res.error || "Namen konnten nicht berechnet werden.", "error"); return; }
+
+  Object.assign(tnState, { kind, videos, defaults: res.defaults });
+  const list = document.getElementById("timelineNamesList");
+  list.innerHTML = "";
+  videos.forEach((v, i) => {
+    const row = document.createElement("div");
+    row.className = "tn-row";
+
+    const img = document.createElement("img");
+    img.className = "tn-thumb";
+    img.alt = "";
+    img.src = `/api/video_thumb?path=${encodeURIComponent(v)}`;
+    img.addEventListener("error", () => img.classList.add("no-thumb"));
+    row.appendChild(img);
+
+    const main = document.createElement("div");
+    main.className = "tn-main";
+    const label = document.createElement("div");
+    label.className = "tn-video";
+    label.textContent = v.split(/[\\/]/).pop();
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tn-input";
+    input.maxLength = 110;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = res.defaults[i];
+    input.addEventListener("input", refreshTimelineNameNotes);
+    const note = document.createElement("div");
+    note.className = "tn-note";
+    main.append(label, input, note);
+    row.appendChild(main);
+    list.appendChild(row);
+  });
+
+  document.getElementById("timelineNamesModal").classList.remove("hidden");
+  const first = list.querySelector(".tn-input");
+  if (first) { first.focus(); first.select(); }
+  refreshTimelineNameNotes();
+}
+
+function closeTimelineNamesModal() {
+  document.getElementById("timelineNamesModal").classList.add("hidden");
+}
+
+// Zeigt je Zeile den tatsaechlichen Dateinamen (nach Bereinigung) und warnt vor dem Ueberschreiben vorhandener Dateien
+function refreshTimelineNameNotes() {
+  clearTimeout(tnState.timer);
+  tnState.timer = setTimeout(async () => {
+    const inputs = [...document.querySelectorAll("#timelineNamesList .tn-input")];
+    if (!inputs.length) return;
+    const token = ++tnState.token;
+    const res = await apiPost("/api/timeline_names", {
+      videos: tnState.videos,
+      names: inputs.map((i) => i.value.trim()),
+    });
+    if (token !== tnState.token || !res.ok) return;
+    document.querySelectorAll("#timelineNamesList .tn-note").forEach((note, i) => {
+      const typed = inputs[i].value.trim();
+      const stem = res.stems[i];
+      note.className = "tn-note";
+      if (res.exists[i]) {
+        note.classList.add("warn");
+        note.textContent = `⚠ ${stem}.fcpxml existiert schon im Ausgabeordner und wird überschrieben`;
+      } else if (typed && typed !== stem) {
+        note.classList.add("changed");
+        note.textContent = `→ wird gespeichert als ${stem}.fcpxml`;
+      } else {
+        note.textContent = `→ ${stem}.fcpxml`;
+      }
+    });
+  }, 150);
+}
+
+async function startFcpxmlWithNames() {
+  if (state.busy) return;
+  const names = [...document.querySelectorAll("#timelineNamesList .tn-input")].map((i) => i.value.trim());
+  const videos = tnState.videos;
+  if (!videos.length || names.length !== videos.length) return;
+
+  closeTimelineNamesModal();
+  setBusy(true);
+  const res = tnState.kind === "export"
+    ? await apiPost("/api/export_fcpxml", { videos, timelineNames: names })
+    : await apiPost("/api/run_ml_pipeline", { videos, exportFcpxml: true, timelineNames: names });
+  if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
+}
+
+
+// ------------------------------------------------------------
 // Einstellungen
 // ------------------------------------------------------------
 
@@ -735,7 +844,7 @@ function renderSettings(schema) {
     const body = lists[item.group] || lists.cutter;
     const row = document.createElement("div");
     row.className = item.type === "text" ? "setting-row wide" : "setting-row";
-
+    row.dataset.setting = item.attr;
     const label = document.createElement("label");
     const labelText = document.createElement("span");
     labelText.textContent = item.label;
@@ -773,6 +882,28 @@ function renderSettings(schema) {
     row.appendChild(input);
 
     body.appendChild(row);
+  });
+
+  const ignoreAudio = document.querySelector('#settingsBody [data-attr="ignore_audio"]');
+  if (ignoreAudio) ignoreAudio.addEventListener("change", updateAudioSettingsVisibility);
+  updateAudioSettingsVisibility();
+}
+
+// Einstellungen, die bei "Nur YOLO-Events (Audio ignorieren)" keine Wirkung haben, werden ausgeblendet
+// (die Werte bleiben erhalten und werden weiter gespeichert)
+const AUDIO_ONLY_SETTINGS = [
+  "audio_threshold_percentile", "audio_pre_buffer_sec",
+  "loud_threshold_percentile", "loud_growth_per_sec", "loud_growth_max_sec",
+  "discard_isolated_audio_points",
+  "enable_internal_gap_removal", "internal_silence_threshold_percentile", "internal_min_gap_sec", "internal_gap_padding_sec",
+  "enable_micro_trim", "micro_trim_search_window_sec", "micro_trim_silence_percentile",
+];
+
+function updateAudioSettingsVisibility() {
+  const ignoreAudio = document.querySelector('#settingsBody [data-attr="ignore_audio"]');
+  const hide = !!(ignoreAudio && ignoreAudio.checked);
+  document.querySelectorAll("#settingsBody .setting-row[data-setting]").forEach((row) => {
+    if (AUDIO_ONLY_SETTINGS.includes(row.dataset.setting)) row.classList.toggle("audio-hidden", hide);
   });
 }
 
@@ -917,15 +1048,22 @@ function showMainView() {
 }
 
 // ------------------------------------------------------------
-// Dataset-Ansicht (nur lesen): alle Train-/Val-Bilder mit ihren Boxen
+// Dataset-Ansicht: alle Train-/Val-Bilder mit ihren Boxen (ansehen; optional bearbeiten)
 // ------------------------------------------------------------
 
 const dsCanvas = document.getElementById("datasetCanvas");
 const dsCtx = dsCanvas.getContext("2d");
-const dataset = { all: [], items: [], index: 0, classes: [], boxesPerClass: {}, loadToken: 0, preload: new Image() };
+const dataset = {
+  all: [], items: [], index: 0, classes: [], boxesPerClass: {}, loadToken: 0, preload: new Image(),
+  editing: false, img: null, meta: null, busy: false,
+};
 
 function datasetViewVisible() {
   return !document.getElementById("datasetView").classList.contains("hidden");
+}
+
+function datasetEditing() {
+  return dataset.editing && datasetViewVisible();
 }
 
 function updateDatasetBadge() {
@@ -934,14 +1072,31 @@ function updateDatasetBadge() {
   document.getElementById("datasetBtn").textContent = `🗂 Dataset (${total})`;
 }
 
+function setDatasetEditing(on) {
+  dataset.editing = on;
+  mouseState = {};
+  state.selectedBox = null;
+  document.getElementById("datasetEditToggle").checked = on;
+  document.getElementById("datasetEditBar").classList.toggle("hidden", !on);
+  dsCanvas.classList.toggle("editing", on);
+  const badge = document.getElementById("datasetModeBadge");
+  badge.textContent = on ? "Bearbeiten" : "Nur Ansicht";
+  badge.classList.toggle("editing", on);
+  paintDataset();
+}
+
 async function openDataset() {
   if (!state.currentGame) { showToast("Kein Spiel ausgewählt.", "warn"); return; }
   const res = await apiGet("/api/dataset/list");
   if (!res.ok) { showToast(res.error || "Dataset konnte nicht geladen werden.", "error"); return; }
 
   dataset.all = res.items;
+  dataset.img = null;
   dataset.classes = res.classes;
   dataset.boxesPerClass = res.boxesPerClass;
+  state.classes = res.classes;
+  state.selectedClass = 0;
+  renderClassButtons();
   document.getElementById("datasetGame").textContent = `– ${res.game}`;
 
   const classSel = document.getElementById("datasetClass");
@@ -955,14 +1110,17 @@ async function openDataset() {
   document.getElementById("datasetSplit").value = "all";
   document.getElementById("datasetBoxes").value = "all";
 
-  renderDatasetLegend(res.counts);
+  renderDatasetLegend();
   document.getElementById("mainView").classList.add("hidden");
   document.getElementById("reviewView").classList.add("hidden");
   document.getElementById("datasetView").classList.remove("hidden");
+  setDatasetEditing(false);
   applyDatasetFilters(false);
 }
 
-function renderDatasetLegend(counts) {
+function renderDatasetLegend() {
+  const counts = { train: 0, val: 0 };
+  dataset.all.forEach((it) => { counts[it.split] += 1; });
   const box = document.getElementById("datasetLegend");
   box.innerHTML = "";
   const addChip = (text, small, color) => {
@@ -1054,6 +1212,8 @@ async function loadDatasetImage() {
 
   const info = document.getElementById("datasetInfo");
   if (!entry) {
+    dataset.img = null;
+    state.reviewBoxes = [];
     drawDatasetMessage(dataset.all.length ? "Keine Bilder für diesen Filter" : "Dieses Spiel hat noch keine Trainingsbilder");
     info.textContent = "";
     return;
@@ -1068,18 +1228,42 @@ async function loadDatasetImage() {
   if (token !== dataset.loadToken) return; // zwischenzeitlich weitergeblaettert
 
   if (!img.naturalWidth) {
+    dataset.img = null;
+    state.reviewBoxes = [];
     drawDatasetMessage("Bild konnte nicht geladen werden");
     info.textContent = entry.id;
     return;
   }
   dsCanvas.width = 1000;
   dsCanvas.height = Math.round(1000 * img.naturalHeight / img.naturalWidth);
-  dsCtx.drawImage(img, 0, 0, dsCanvas.width, dsCanvas.height);
-  const boxes = labels.ok ? labels.boxes : [];
-  drawDatasetBoxes(boxes);
+  dataset.img = img;
+  dataset.meta = labels.ok ? labels.meta : null;
+  state.reviewBoxes = labels.ok ? labels.boxes : [];
+  state.selectedBox = null;
+  mouseState = {};
+  entry.saved = state.reviewBoxes.map((b) => ({ ...b })); // Stand auf der Platte, fuer die Box-Zaehler beim Speichern
+  paintDataset();
+  updateDatasetInfo();
 
-  const lines = [`${entry.id}  ·  ${entry.split === "train" ? "Train" : "Val"}  ·  ${boxes.length} ${boxes.length === 1 ? "Box" : "Boxen"}`];
-  const m = labels.ok ? labels.meta : null;
+  // naechstes Bild schon vorladen, damit das Blaettern flott bleibt
+  const next = dataset.items[dataset.index + 1];
+  if (next) dataset.preload.src = `/api/dataset/image/${next.split}/${encodeURIComponent(next.id)}`;
+}
+
+function paintDataset() {
+  if (!dataset.img) return;
+  dsCtx.clearRect(0, 0, dsCanvas.width, dsCanvas.height);
+  dsCtx.drawImage(dataset.img, 0, 0, dsCanvas.width, dsCanvas.height);
+  if (datasetEditing()) state.reviewBoxes.forEach((b, i) => drawBox(b, i));
+  else drawDatasetBoxes(state.reviewBoxes);
+}
+
+function updateDatasetInfo() {
+  const entry = dataset.items[dataset.index];
+  if (!entry) return;
+  const n = state.reviewBoxes.length;
+  const lines = [`${entry.id}  ·  ${entry.split === "train" ? "Train" : "Val"}  ·  ${n} ${n === 1 ? "Box" : "Boxen"}`];
+  const m = dataset.meta;
   if (m) {
     const parts = [];
     if (m.video) parts.push(`Video: ${m.video}`);
@@ -1087,11 +1271,66 @@ async function loadDatasetImage() {
     if (typeof m.confidence === "number" && m.confidence > 0) parts.push(`Modell-Konfidenz ${m.confidence.toFixed(2)}`);
     if (parts.length) lines.push(parts.join("  ·  "));
   }
-  info.textContent = lines.join("\n");
+  document.getElementById("datasetInfo").textContent = lines.join("\n");
+}
 
-  // naechstes Bild schon vorladen, damit das Blaettern flott bleibt
-  const next = dataset.items[dataset.index + 1];
-  if (next) dataset.preload.src = `/api/dataset/image/${next.split}/${encodeURIComponent(next.id)}`;
+function addBoxCounts(boxes, sign) {
+  boxes.forEach((b) => {
+    const k = String(b.cls);
+    const v = (dataset.boxesPerClass[k] ?? 0) + sign;
+    if (v > 0) dataset.boxesPerClass[k] = v;
+    else delete dataset.boxesPerClass[k];
+  });
+}
+
+function adjustDatasetStats(entry, delta) {
+  const st = state.datasetStats;
+  if (!st) return;
+  st[entry.split] = Math.max(0, (st[entry.split] ?? 0) + delta);
+  updateDatasetBadge();
+}
+
+async function saveDatasetLabels() {
+  const entry = dataset.items[dataset.index];
+  if (!entry) return;
+  const boxes = state.reviewBoxes.map((b) => ({ ...b }));
+  const res = await apiPost(`/api/dataset/labels/${entry.split}/${encodeURIComponent(entry.id)}`, { boxes });
+  if (!res.ok) { showToast(res.error || "Speichern fehlgeschlagen.", "error"); return; }
+
+  const hadBoxes = entry.n > 0;
+  addBoxCounts(entry.saved ?? [], -1);
+  addBoxCounts(res.boxes, 1);
+  entry.saved = res.boxes;
+  entry.n = res.n;
+  entry.cls = res.cls;
+  if (state.datasetStats && hadBoxes !== (res.n > 0)) {
+    state.datasetStats.with_boxes = Math.max(0, (state.datasetStats.with_boxes ?? 0) + (res.n > 0 ? 1 : -1));
+  }
+  renderDatasetLegend();
+  updateDatasetInfo();
+}
+
+async function deleteDatasetImage() {
+  const entry = dataset.items[dataset.index];
+  if (!entry || dataset.busy) return;
+  if (!confirm(`Bild ${entry.id} aus dem Dataset entfernen?\n\nEs wird samt Label in den Ordner „discarded“ verschoben (nicht endgültig gelöscht).`)) return;
+  dataset.busy = true;
+  try {
+    const res = await apiPost(`/api/dataset/delete/${entry.split}/${encodeURIComponent(entry.id)}`);
+    if (!res.ok) { showToast(res.error || "Löschen fehlgeschlagen.", "error"); return; }
+
+    addBoxCounts(entry.saved ?? [], -1);
+    adjustDatasetStats(entry, -1);
+    if (state.datasetStats && entry.n > 0) state.datasetStats.with_boxes = Math.max(0, (state.datasetStats.with_boxes ?? 0) - 1);
+    dataset.all = dataset.all.filter((it) => it !== entry);
+    dataset.items.splice(dataset.index, 1);
+    dataset.index = Math.min(dataset.index, Math.max(0, dataset.items.length - 1));
+    document.getElementById("datasetJump").max = String(Math.max(1, dataset.items.length));
+    renderDatasetLegend();
+    loadDatasetImage();
+  } finally {
+    dataset.busy = false;
+  }
 }
 
 function onDatasetKeyDown(e) {
@@ -1102,6 +1341,11 @@ function onDatasetKeyDown(e) {
   else if (e.key === "Home") { datasetGo(0); e.preventDefault(); }
   else if (e.key === "End") { datasetGo(dataset.items.length - 1); e.preventDefault(); }
   else if (e.key === "Escape") showMainView();
+  else if (datasetEditing() && e.key === "Delete") deleteSelectedBox();
+  else if (datasetEditing() && /^[1-9]$/.test(e.key)) {
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx < state.classes.length) selectClass(idx);
+  }
 }
 
 // ------------------------------------------------------------
@@ -1125,15 +1369,17 @@ async function openReview() {
 }
 
 function renderClassButtons() {
-  const container = document.getElementById("classButtons");
-  container.innerHTML = "";
-  state.classes.forEach((name, i) => {
-    const btn = document.createElement("button");
-    btn.className = "class-btn";
-    btn.style.background = classColor(i);
-    btn.textContent = `${i + 1}: ${name}`;
-    btn.addEventListener("click", () => selectClass(i));
-    container.appendChild(btn);
+  ["classButtons", "datasetClassButtons"].forEach((id) => {
+    const container = document.getElementById(id);
+    container.innerHTML = "";
+    state.classes.forEach((name, i) => {
+      const btn = document.createElement("button");
+      btn.className = "class-btn";
+      btn.style.background = classColor(i);
+      btn.textContent = `${i + 1}: ${name}`;
+      btn.addEventListener("click", () => selectClass(i));
+      container.appendChild(btn);
+    });
   });
   updateClassButtonStyles();
 }
@@ -1182,7 +1428,14 @@ function loadReviewImage() {
   currentImg.src = `/api/review/image/${entry.id}?t=${Date.now()}`;
 }
 
+// Aktives Zeichenziel: Dataset-Canvas im Bearbeiten-Modus, sonst der Review-Canvas.
+// Beide Ansichten teilen sich Box-Puffer (state.reviewBoxes), Auswahl und Klassenwahl - es ist immer nur eine sichtbar.
+function editTarget() {
+  return datasetEditing() ? { cv: dsCanvas, c: dsCtx } : { cv: canvas, c: ctx };
+}
+
 function redraw() {
+  if (datasetEditing()) { paintDataset(); return; }
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (currentImg.complete && currentImg.naturalWidth) {
     ctx.drawImage(currentImg, 0, 0, canvas.width, canvas.height);
@@ -1191,50 +1444,53 @@ function redraw() {
 }
 
 function drawBox(b, i) {
-  const x = b.x * canvas.width;
-  const y = b.y * canvas.height;
-  const w = b.w * canvas.width;
-  const h = b.h * canvas.height;
+  const { cv, c } = editTarget();
+  const x = b.x * cv.width;
+  const y = b.y * cv.height;
+  const w = b.w * cv.width;
+  const h = b.h * cv.height;
   const color = classColor(b.cls);
 
-  ctx.strokeStyle = color;
-  ctx.lineWidth = state.selectedBox === i ? 3 : 2;
-  ctx.strokeRect(x - w / 2, y - h / 2, w, h);
+  c.strokeStyle = color;
+  c.lineWidth = state.selectedBox === i ? 3 : 2;
+  c.strokeRect(x - w / 2, y - h / 2, w, h);
 
-  ctx.fillStyle = color;
-  ctx.font = "bold 13px sans-serif";
-  ctx.textAlign = "left";
+  c.fillStyle = color;
+  c.font = "bold 13px sans-serif";
+  c.textAlign = "left";
   const name = state.classes[b.cls] ?? `cls${b.cls}`;
-  ctx.fillText(name, x - w / 2 + 4, y - h / 2 - 6);
+  c.fillText(name, x - w / 2 + 4, y - h / 2 - 6);
 
   if (state.selectedBox === i) {
     const corners = [
       [x - w / 2, y - h / 2], [x + w / 2, y - h / 2],
       [x - w / 2, y + h / 2], [x + w / 2, y + h / 2],
     ];
-    ctx.fillStyle = "yellow";
-    ctx.strokeStyle = "black";
+    c.fillStyle = "yellow";
+    c.strokeStyle = "black";
     corners.forEach(([hx, hy]) => {
-      ctx.fillRect(hx - HANDLE_SIZE, hy - HANDLE_SIZE, HANDLE_SIZE * 2, HANDLE_SIZE * 2);
-      ctx.strokeRect(hx - HANDLE_SIZE, hy - HANDLE_SIZE, HANDLE_SIZE * 2, HANDLE_SIZE * 2);
+      c.fillRect(hx - HANDLE_SIZE, hy - HANDLE_SIZE, HANDLE_SIZE * 2, HANDLE_SIZE * 2);
+      c.strokeRect(hx - HANDLE_SIZE, hy - HANDLE_SIZE, HANDLE_SIZE * 2, HANDLE_SIZE * 2);
     });
   }
 }
 
 function canvasPos(e) {
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
+  const { cv } = editTarget();
+  const rect = cv.getBoundingClientRect();
+  const scaleX = cv.width / rect.width;
+  const scaleY = cv.height / rect.height;
   return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
 }
 
 function findBox(x, y) {
+  const { cv } = editTarget();
   // Bei ueberlappenden Boxen die kleinste getroffene waehlen, sonst ist eine Box in einer groesseren nie anklickbar
   let best = null, bestArea = Infinity;
   for (let i = 0; i < state.reviewBoxes.length; i++) {
     const b = state.reviewBoxes[i];
-    const cx = b.x * canvas.width, cy = b.y * canvas.height;
-    const w = b.w * canvas.width, h = b.h * canvas.height;
+    const cx = b.x * cv.width, cy = b.y * cv.height;
+    const w = b.w * cv.width, h = b.h * cv.height;
     if (x >= cx - w / 2 && x <= cx + w / 2 && y >= cy - h / 2 && y <= cy + h / 2 && w * h < bestArea) {
       best = i;
       bestArea = w * h;
@@ -1245,9 +1501,10 @@ function findBox(x, y) {
 
 function hitTestHandle(idx, x, y) {
   if (idx === null || idx >= state.reviewBoxes.length) return null;
+  const { cv } = editTarget();
   const b = state.reviewBoxes[idx];
-  const cx = b.x * canvas.width, cy = b.y * canvas.height;
-  const w = b.w * canvas.width, h = b.h * canvas.height;
+  const cx = b.x * cv.width, cy = b.y * cv.height;
+  const w = b.w * cv.width, h = b.h * cv.height;
   const corners = {
     tl: [cx - w / 2, cy - h / 2], tr: [cx + w / 2, cy - h / 2],
     bl: [cx - w / 2, cy + h / 2], br: [cx + w / 2, cy + h / 2],
@@ -1259,9 +1516,10 @@ function hitTestHandle(idx, x, y) {
 }
 
 function resizeSelected(x, y, corner) {
+  const { cv } = editTarget();
   const b = state.reviewBoxes[state.selectedBox];
-  const cx = b.x * canvas.width, cy = b.y * canvas.height;
-  const w = b.w * canvas.width, h = b.h * canvas.height;
+  const cx = b.x * cv.width, cy = b.y * cv.height;
+  const w = b.w * cv.width, h = b.h * cv.height;
   let left = cx - w / 2, top = cy - h / 2, right = cx + w / 2, bottom = cy + h / 2;
 
   if (corner.includes("l")) left = x;
@@ -1271,14 +1529,22 @@ function resizeSelected(x, y, corner) {
 
   if (right - left < 10 || bottom - top < 10) return;
 
-  b.x = (left + right) / 2 / canvas.width;
-  b.y = (top + bottom) / 2 / canvas.height;
-  b.w = (right - left) / canvas.width;
-  b.h = (bottom - top) / canvas.height;
+  b.x = (left + right) / 2 / cv.width;
+  b.y = (top + bottom) / 2 / cv.height;
+  b.w = (right - left) / cv.width;
+  b.h = (bottom - top) / cv.height;
 }
 
 function bindCanvasEvents() {
-  canvas.addEventListener("mousedown", (e) => {
+  [canvas, dsCanvas].forEach(bindEditorCanvas);
+}
+
+function bindEditorCanvas(cv) {
+  // Der Dataset-Canvas reagiert nur im Bearbeiten-Modus, der Review-Canvas nur, solange kein Dataset-Edit aktiv ist
+  const active = () => editTarget().cv === cv;
+
+  cv.addEventListener("mousedown", (e) => {
+    if (!active()) return;
     const { x, y } = canvasPos(e);
 
     if (state.selectedBox !== null) {
@@ -1291,7 +1557,7 @@ function bindCanvasEvents() {
 
     if (hit !== null) {
       const b = state.reviewBoxes[hit];
-      const cx = b.x * canvas.width, cy = b.y * canvas.height;
+      const cx = b.x * cv.width, cy = b.y * cv.height;
       mouseState = { mode: "drag", dragOffset: [cx - x, cy - y] };
     } else {
       mouseState = { mode: "create", startX: x, startY: y };
@@ -1299,27 +1565,29 @@ function bindCanvasEvents() {
     redraw();
   });
 
-  canvas.addEventListener("mousemove", (e) => {
-    if (!mouseState.mode) return;
+  cv.addEventListener("mousemove", (e) => {
+    if (!active() || !mouseState.mode) return;
     const { x, y } = canvasPos(e);
+    const { c } = editTarget();
 
     if (mouseState.mode === "resize") {
       resizeSelected(x, y, mouseState.corner);
       redraw();
     } else if (mouseState.mode === "drag" && state.selectedBox !== null) {
       const [dx, dy] = mouseState.dragOffset;
-      state.reviewBoxes[state.selectedBox].x = (x + dx) / canvas.width;
-      state.reviewBoxes[state.selectedBox].y = (y + dy) / canvas.height;
+      state.reviewBoxes[state.selectedBox].x = (x + dx) / cv.width;
+      state.reviewBoxes[state.selectedBox].y = (y + dy) / cv.height;
       redraw();
     } else if (mouseState.mode === "create") {
       redraw();
-      ctx.strokeStyle = "lime";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(mouseState.startX, mouseState.startY, x - mouseState.startX, y - mouseState.startY);
+      c.strokeStyle = "lime";
+      c.lineWidth = 2;
+      c.strokeRect(mouseState.startX, mouseState.startY, x - mouseState.startX, y - mouseState.startY);
     }
   });
 
-  canvas.addEventListener("mouseup", async (e) => {
+  cv.addEventListener("mouseup", async (e) => {
+    if (!active()) return;
     const { x, y } = canvasPos(e);
 
     if (mouseState.mode === "resize" || mouseState.mode === "drag") {
@@ -1335,10 +1603,10 @@ function bindCanvasEvents() {
         const top = Math.min(sy, y), bottom = Math.max(sy, y);
         state.reviewBoxes.push({
           cls: state.selectedClass,
-          x: (left + right) / 2 / canvas.width,
-          y: (top + bottom) / 2 / canvas.height,
-          w: (right - left) / canvas.width,
-          h: (bottom - top) / canvas.height,
+          x: (left + right) / 2 / cv.width,
+          y: (top + bottom) / 2 / cv.height,
+          w: (right - left) / cv.width,
+          h: (bottom - top) / cv.height,
         });
         state.selectedBox = state.reviewBoxes.length - 1;
         await saveLabels();
@@ -1350,6 +1618,7 @@ function bindCanvasEvents() {
 }
 
 async function saveLabels() {
+  if (datasetEditing()) return saveDatasetLabels();
   const entry = state.reviewImages[state.reviewIndex];
   if (!entry) return;
   await apiPost(`/api/review/labels/${entry.id}`, { boxes: state.reviewBoxes });

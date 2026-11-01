@@ -211,3 +211,24 @@ class DatasetManager:
             if src.exists():
                 src.rename(self.discarded_dir / f"{stem}{src.suffix}")
         return self.discarded_dir / f"{stem}.jpg"
+
+    def discard_dataset_sample(self, split: str, sample_id: str) -> Path:
+        """Verschiebt ein Bild aus train/val samt Label (und evtl. Review-Metadaten) nach discarded/."""
+        if split == "train":
+            img_dir, lbl_dir = self.train_images, self.train_labels
+        elif split == "val":
+            img_dir, lbl_dir = self.val_images, self.val_labels
+        else:
+            raise ValueError(f"Unbekannter Split: {split}")
+
+        self.discarded_dir.mkdir(parents=True, exist_ok=True)
+        sources = [
+            img_dir / f"{sample_id}.jpg",
+            lbl_dir / f"{sample_id}.txt",
+            self.review_metadata / f"{sample_id}.json",
+        ]
+        stem = self._free_stem(sample_id, [(self.discarded_dir, p.suffix) for p in sources])
+        for src in sources:
+            if src.exists():
+                src.rename(self.discarded_dir / f"{stem}{src.suffix}")
+        return self.discarded_dir / f"{stem}.jpg"

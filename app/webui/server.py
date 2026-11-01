@@ -43,6 +43,7 @@ from app.core.pipeline_controller import (
 from app.core.bootstrap import BOOTSTRAP_FRAME_TARGET, FIRST_MODEL_MIN_LABELED, extract_bootstrap_frames
 from app.core.adaptive_thresholds import resolve_ml_params
 from app.core.fast_scan import collect_events
+from app.export.naming import build_timeline_stems, resolve_stems
 from app.core.model_tester import test_model_on_video
 from app.dataset.dataset_manager import DatasetManager
 from app.extractor.frame_extractor import FrameExtractor
@@ -61,7 +62,8 @@ FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 OUTPUT_DIR = r"D:\EDITED CLIPS\Skript Cutted\Fertig zur Finalisierung"
 
 SETTINGS_SCHEMA = [
-    ("ignore_audio", "Nur YOLO-Events (Audio ignorieren)", "bool", "Audio wird bei der Clip-Erkennung gar nicht beachtet: keine Audio-Peaks, kein Lautstaerke-Bonus, keine Stille-Luecken (Stufe 2) und kein Mikro-Trim (Stufe 3). Nur YOLO-Events bestimmen die Clips. Die Audio-Einstellungen darunter greifen dann nicht"),
+    ("export_name_prefix", "Export: Namenspraefix (FCPXML + Logs)", "text", "Praefix vor dem Dateinamen der FCPXML-Timeline und ihrer Log-Dateien, z.B. 'timeline - ' ergibt 'timeline - <Name>.fcpxml' und 'timeline - <Name>_log.txt'. Der Name ist auch der Timeline-Name in DaVinci Resolve. Leer = kein Praefix. Den Namen selbst gibst du im Popup nach dem Klick auf einen FCPXML-Button ein (Standard = Praefix + Videoname)"),
+    ("ignore_audio", "Nur YOLO-Events (Audio ignorieren)", "bool", "Audio wird bei der Clip-Erkennung gar nicht beachtet: keine Audio-Peaks, kein Lautstaerke-Bonus, keine Stille-Luecken (Stufe 2) und kein Mikro-Trim (Stufe 3). Nur YOLO-Events bestimmen die Clips. Die Audio-Einstellungen (Peaks, Lautstaerke-Bonus, Stufe 2/3) werden dann ausgeblendet"),
     ("audio_threshold_percentile", "Audio Peak-Threshold Percentile", "float", "Ab welchem RMS-Percentile ein Audio-Punkt zaehlt (hoch = nur sehr laute Stellen)"),
     ("cluster_max_gap_sec", "Cluster Max. Abstand (s)", "float", "Max. Abstand (s) zwischen Punkten im selben Cluster"),
     ("audio_pre_buffer_sec", "Audio Pre-Buffer (s)", "float", "Puffer VOR einem Audio-Peak-Cluster"),
@@ -158,6 +160,15 @@ def make_video_thumbnail(video_path: str):
     except (OSError, subprocess.SubprocessError):
         pass
     return None
+
+
+def _written_files_note(stems: list) -> str:
+    """Kurzer Hinweis fuer die Fertig-Meldung, welche FCPXML-Dateien geschrieben wurden."""
+    if not stems:
+        return ""
+    shown = ", ".join(f"{s}.fcpxml" for s in stems[:3])
+    more = f" (+{len(stems) - 3} weitere)" if len(stems) > 3 else ""
+    return f"\nDatei: {shown}{more} (+ Log-Dateien) in {OUTPUT_DIR}"
 
 
 MAX_COLLECT_FRAMES = 5000  # Obergrenze fuer 'Daten sammeln' (Schutz vor Tippfehlern)
@@ -403,6 +414,8 @@ class Core:
             if value != value or value in (float("inf"), float("-inf")):
                 raise ValueError("keine endliche Zahl")
             return value
+        if attr == "export_name_prefix":
+            return str(raw).lstrip()  # abschliessendes Leerzeichen ("timeline - ") muss erhalten bleiben
         text = str(raw).strip()  # "text" | "choice"
         return (text or None) if attr == "whisper_language" else text
 
@@ -821,11 +834,13 @@ class Core:
             self._push("busy", False)
 
     def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False, ml_only: bool = False,
-                        collect_frames=None):
+                        collect_frames=None, timeline_name: str = "", timeline_names=None):
         """
         export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden.
         ml_only=True: nur Events erkennen + ML-Pipeline (Daten sammeln), weder schneiden noch FCPXML.
         collect_frames: Ziel-Frames fuer 'Daten sammeln'; wird fuer das aktuelle Spiel gespeichert.
+        timeline_name: eigener Name fuer FCPXML + Log-Dateien (leer = Videoname).
+        timeline_names: eine Eingabe pro Video (Popup); hat Vorrang vor timeline_name.
         """
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
@@ -833,6 +848,12 @@ class Core:
             return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+
+        stems = None
+        if export_fcpxml and not ml_only:
+            stems, err = self._resolve_stems(video_paths, timeline_name, timeline_names)
+            if err:
+                return err
 
         customized = None
         if ml_only and collect_frames is not None:
@@ -850,21 +871,23 @@ class Core:
         self.cancel_event = threading.Event()
         threading.Thread(
             target=self._ml_pipeline_worker,
-            args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only)),
+            args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only), stems),
             daemon=True,
         ).start()
         return {"ok": True, "customized": customized, "collectFrames": self.cfg.ml_collect_frames}
 
-    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False):
+    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False, stems=None):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
         try:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             self._sync_model_path()
+            stems = stems or build_timeline_stems(video_paths, "", self.cfg.export_name_prefix)
             total = len(video_paths)
             totals = _new_ml_totals()
             total_clips = 0
+            written: list[str] = []
             dm = self._dm()
             params = None
             if ml_only:
@@ -950,10 +973,12 @@ class Core:
 
                 if export_fcpxml:
                     result = export_fcpxml_timeline(
-                        output_path=os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml"),
+                        output_path=os.path.join(OUTPUT_DIR, f"{stems[idx - 1]}.fcpxml"),
                         **analysis_kwargs,
                     )
                     total_clips += result["clip_count"]
+                    if result["clip_count"]:
+                        written.append(stems[idx - 1])
                 else:
                     result = process_video(
                         output_path=os.path.join(OUTPUT_DIR, f"{base}_highlight.mp4"),
@@ -998,6 +1023,7 @@ class Core:
             self._push("status", "ML-Pipeline fertig")
             if export_fcpxml:
                 message += f"\n{total_clips} Clips als FCPXML exportiert (KEIN Video geschnitten)"
+                message += _written_files_note(written)
             self._push("done", {"message": message})
         except Exception as e:
             self._push("cancelled" if cancel_event.is_set() else "error", str(e))
@@ -1143,24 +1169,65 @@ class Core:
             os.startfile(path)
         return {"ok": True}
 
-    def export_fcpxml(self, video_paths: list):
+    def _resolve_stems(self, video_paths: list, timeline_name: str = "", timeline_names=None):
+        """
+        Endgueltige Datei-Stems je Video. timeline_names (eine Eingabe pro Video, z.B. aus dem Popup) hat
+        Vorrang; sonst gilt Praefix + eigener Name (timeline_name) bzw. Videoname. Gibt (stems, fehler) zurueck.
+        """
+        defaults = build_timeline_stems(video_paths, str(timeline_name or ""), self.cfg.export_name_prefix)
+        if timeline_names is None:
+            return defaults, None
+        if not isinstance(timeline_names, list) or len(timeline_names) != len(video_paths):
+            return None, {"ok": False, "error": "Die Anzahl der Timeline-Namen passt nicht zur Anzahl der Videos."}
+        return resolve_stems([str(n or "") for n in timeline_names], defaults), None
+
+    def timeline_names(self, video_paths: list, timeline_name: str = "", names=None):
+        """
+        Vorschau der Dateinamen (gleiche Logik wie beim Export). 'defaults' sind die Standardnamen
+        (Praefix + Videoname bzw. eigener Name), 'stems' die Namen nach Auswertung der Eingaben 'names',
+        'exists' zeigt, ob die FCPXML-Datei im Ausgabeordner schon vorhanden ist (wuerde ueberschrieben).
+        """
+        videos = [str(v) for v in (video_paths or [])][:500] or ["Videoname.mp4"]
+        defaults = build_timeline_stems(videos, str(timeline_name or ""), self.cfg.export_name_prefix)
+        stems = defaults
+        if isinstance(names, list):
+            typed = [str(n or "") for n in names][:len(videos)]
+            typed += [""] * (len(videos) - len(typed))
+            stems = resolve_stems(typed, defaults)
+        placeholder = not video_paths
+        exists = [False] * len(stems) if placeholder else [
+            os.path.isfile(os.path.join(OUTPUT_DIR, f"{s}.fcpxml")) for s in stems
+        ]
+        return {"ok": True, "stems": stems, "defaults": defaults, "exists": exists,
+                "placeholder": placeholder, "dir": OUTPUT_DIR}
+
+    def export_fcpxml(self, video_paths: list, timeline_name: str = "", timeline_names=None):
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
         if (err := self._require_model()):
             return err
         if self.cancel_event is not None:
             return {"ok": False, "error": "Es laeuft bereits ein Vorgang."}
+        stems, err = self._resolve_stems(video_paths, timeline_name, timeline_names)
+        if err:
+            return err
         self.cancel_event = threading.Event()
-        threading.Thread(target=self._fcpxml_worker, args=(list(video_paths), self.cancel_event), daemon=True).start()
+        threading.Thread(
+            target=self._fcpxml_worker,
+            args=(list(video_paths), self.cancel_event, stems),
+            daemon=True,
+        ).start()
         return {"ok": True}
 
-    def _fcpxml_worker(self, video_paths, cancel_event):
+    def _fcpxml_worker(self, video_paths, cancel_event, stems=None):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
         try:
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             self._sync_model_path()
+            stems = stems or build_timeline_stems(video_paths, "", self.cfg.export_name_prefix)
+            written: list[str] = []
             total = len(video_paths)
             total_clips = 0
             total_top = 0
@@ -1170,8 +1237,7 @@ class Core:
                     raise RuntimeError("Vorgang abgebrochen.")
 
                 self._push("status", f"FCPXML-Export: {os.path.basename(video)}")
-                base = os.path.splitext(os.path.basename(video))[0]
-                output_path = os.path.join(OUTPUT_DIR, f"{base}_timeline.fcpxml")
+                output_path = os.path.join(OUTPUT_DIR, f"{stems[idx - 1]}.fcpxml")
 
                 result = export_fcpxml_timeline(
                     video_path=video,
@@ -1184,6 +1250,8 @@ class Core:
                 )
                 total_clips += result["clip_count"]
                 total_top += len(result["top_clip_indices"])
+                if result["clip_count"]:
+                    written.append(stems[idx - 1])
                 self._push("overallProgress", {"idx": idx, "total": total})
 
             self._push("status", "FCPXML-Export fertig")
@@ -1191,6 +1259,7 @@ class Core:
                 "message": (
                     f"{total_clips} Clips in {total} Timeline(s) exportiert "
                     f"({total_top} Top-Marker gesetzt). Es wurde KEIN Video geschnitten."
+                    + _written_files_note(written)
                 ),
             })
         except Exception as e:
@@ -1228,7 +1297,7 @@ class Core:
         return path if path.is_file() else None
 
     # ------------------------------------------------------------
-    # Dataset-Ansicht (nur lesen): train/val-Bilder samt Labels
+    # Dataset-Ansicht: train/val-Bilder samt Labels (lesen, Boxen bearbeiten, Bild loeschen)
     # ------------------------------------------------------------
 
     _DATASET_SPLITS = ("train", "val")
@@ -1315,6 +1384,51 @@ class Core:
             except (OSError, ValueError):
                 pass
         return result
+
+    def _dataset_edit_guard(self, split: str, sample_id: str):
+        """Fehlerdict, falls das Bild nicht bearbeitet werden darf (Vorgang laeuft / nicht vorhanden), sonst None."""
+        if self.cancel_event is not None:
+            return {"ok": False, "error": "Es laeuft gerade ein Vorgang (z.B. Training) - bitte warten."}
+        if self.dataset_image_path(split, sample_id) is None:
+            return {"ok": False, "error": "Bild nicht gefunden."}
+        return None
+
+    def dataset_save_labels(self, split: str, sample_id: str, boxes: list):
+        error = self._dataset_edit_guard(split, sample_id)
+        if error:
+            return error
+
+        n_classes = len(self._dm().game.classes)
+        clean = []
+        try:
+            for b in boxes or []:
+                cls = int(b["cls"])
+                x, y, w, h = (min(1.0, max(0.0, float(b[k]))) for k in ("x", "y", "w", "h"))
+                if not 0 <= cls < n_classes:
+                    return {"ok": False, "error": f"Ungueltige Klasse: {cls}"}
+                if w <= 0 or h <= 0:
+                    continue
+                clean.append({"cls": cls, "x": x, "y": y, "w": w, "h": h})
+        except (KeyError, TypeError, ValueError):
+            return {"ok": False, "error": "Ungueltige Box-Daten."}
+
+        _, lbl_dir = self._dataset_dirs(split)
+        text = "".join(f"{b['cls']} {b['x']:.6f} {b['y']:.6f} {b['w']:.6f} {b['h']:.6f}\n" for b in clean)
+        try:
+            self._retry_locked(lambda: (lbl_dir / f"{sample_id}.txt").write_text(text, encoding="utf-8"))
+        except OSError as e:
+            return {"ok": False, "error": f"Speichern fehlgeschlagen: {e}"}
+        return {"ok": True, "n": len(clean), "cls": sorted({b["cls"] for b in clean}), "boxes": clean}
+
+    def dataset_delete(self, split: str, sample_id: str):
+        error = self._dataset_edit_guard(split, sample_id)
+        if error:
+            return error
+        try:
+            self._retry_locked(lambda: self._dm().discard_dataset_sample(split, sample_id))
+        except OSError as e:
+            return {"ok": False, "error": f"Loeschen fehlgeschlagen: {e}"}
+        return {"ok": True}
 
     def review_get_labels(self, sample_id: str):
         dm = self._dm()
@@ -1498,8 +1612,14 @@ def api_run_ml_pipeline():
     data = request.get_json(force=True)
     return jsonify(core.run_ml_pipeline(
         data.get("videos", []), bool(data.get("exportFcpxml", False)), bool(data.get("mlOnly", False)),
-        data.get("collectFrames"),
+        data.get("collectFrames"), data.get("timelineName") or "", data.get("timelineNames"),
     ))
+
+
+@app.route("/api/timeline_names", methods=["POST"])
+def api_timeline_names():
+    data = request.get_json(force=True)
+    return jsonify(core.timeline_names(data.get("videos") or [], data.get("name") or "", data.get("names")))
 
 
 @app.route("/api/test_model", methods=["POST"])
@@ -1517,7 +1637,10 @@ def api_open_test_output():
 
 @app.route("/api/export_fcpxml", methods=["POST"])
 def api_export_fcpxml():
-    return jsonify(core.export_fcpxml(request.get_json(force=True).get("videos", [])))
+    data = request.get_json(force=True)
+    return jsonify(core.export_fcpxml(
+        data.get("videos", []), data.get("timelineName") or "", data.get("timelineNames")
+    ))
 
 
 @app.route("/api/training_overview")
@@ -1574,6 +1697,16 @@ def api_dataset_image(split, sample_id):
 @app.route("/api/dataset/labels/<split>/<sample_id>")
 def api_dataset_labels(split, sample_id):
     return jsonify(core.dataset_labels(split, sample_id))
+
+
+@app.route("/api/dataset/labels/<split>/<sample_id>", methods=["POST"])
+def api_dataset_save_labels(split, sample_id):
+    return jsonify(core.dataset_save_labels(split, sample_id, request.get_json(force=True).get("boxes", [])))
+
+
+@app.route("/api/dataset/delete/<split>/<sample_id>", methods=["POST"])
+def api_dataset_delete(split, sample_id):
+    return jsonify(core.dataset_delete(split, sample_id))
 
 
 @app.route("/api/review/labels/<sample_id>")

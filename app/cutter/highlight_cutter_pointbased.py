@@ -148,6 +148,9 @@ class Config:
     # --- Merge ---
     merge_gap_sec: float = 1.0
 
+    # --- Export-Dateinamen (FCPXML + Log-Dateien) ---
+    export_name_prefix: str = "timeline - "  # Praefix vor dem Namen, ist zugleich der Timeline-Name in Resolve
+
     # --- Encoding ---
     use_gpu_encoding: bool = True
     crf: int = 14
