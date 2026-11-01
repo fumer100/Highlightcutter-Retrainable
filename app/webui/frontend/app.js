@@ -736,7 +736,8 @@ async function openTimelineNamesModal(kind) {
   const res = await apiPost("/api/timeline_names", { videos });
   if (!res.ok) { showToast(res.error || "Namen konnten nicht berechnet werden.", "error"); return; }
 
-  Object.assign(tnState, { kind, videos, defaults: res.defaults });
+  Object.assign(tnState, { kind, videos, defaults: res.defaults, eventClasses: res.eventClasses || [] });
+  renderTimelineEventChoices();
   const list = document.getElementById("timelineNamesList");
   list.innerHTML = "";
   videos.forEach((v, i) => {
@@ -780,6 +781,23 @@ function closeTimelineNamesModal() {
   document.getElementById("timelineNamesModal").classList.add("hidden");
 }
 
+// Eine Checkbox je YOLO-Event-Klasse des Spiels, alle vorausgewaehlt
+function renderTimelineEventChoices() {
+  const box = document.getElementById("timelineEventsBox");
+  const list = document.getElementById("timelineEventsList");
+  list.innerHTML = "";
+  box.classList.toggle("hidden", !tnState.eventClasses.length);
+  tnState.eventClasses.forEach((name) => {
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.value = name;
+    label.append(cb, document.createTextNode(name));
+    list.appendChild(label);
+  });
+}
+
 // Zeigt je Zeile den tatsaechlichen Dateinamen (nach Bereinigung) und warnt vor dem Ueberschreiben vorhandener Dateien
 function refreshTimelineNameNotes() {
   clearTimeout(tnState.timer);
@@ -815,11 +833,18 @@ async function startFcpxmlWithNames() {
   const videos = tnState.videos;
   if (!videos.length || names.length !== videos.length) return;
 
+  const eventClasses = [...document.querySelectorAll("#timelineEventsList input:checked")].map((cb) => cb.value);
+  if (tnState.eventClasses.length && !eventClasses.length && !confirm(
+    "Es ist kein YOLO-Event ausgewählt. Die Timeline wird dann nur anhand der Audio-Analyse erstellt.\n\nTrotzdem starten?")) {
+    return;
+  }
+
   closeTimelineNamesModal();
   setBusy(true);
+  const body = { videos, timelineNames: names, eventClasses: tnState.eventClasses.length ? eventClasses : null };
   const res = tnState.kind === "export"
-    ? await apiPost("/api/export_fcpxml", { videos, timelineNames: names })
-    : await apiPost("/api/run_ml_pipeline", { videos, exportFcpxml: true, timelineNames: names });
+    ? await apiPost("/api/export_fcpxml", body)
+    : await apiPost("/api/run_ml_pipeline", { ...body, exportFcpxml: true });
   if (!res.ok) { setBusy(false); showToast(res.error, "error"); }
 }
 

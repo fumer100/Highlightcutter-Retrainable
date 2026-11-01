@@ -208,18 +208,27 @@ def _run_yolo_batch(model, batch, cfg, event_times, fps):
     frames = [f for _, f in batch]
     results = model.predict(frames, conf=cfg.yolo_confidence, verbose=False)
     for frame_idx, r in zip(frame_indices, results):
+        found = set()
         for box in r.boxes:
             cls_id = int(box.cls[0])
             cls_name = model.names.get(cls_id, str(cls_id))
             if cfg.yolo_target_classes and cls_name not in cfg.yolo_target_classes:
                 continue
-            t = round(frame_idx / fps, 2)
-            event_times.add(t)
-            break
+            found.add(cls_name)
+        if found:
+            event_times.setdefault(round(frame_idx / fps, 2), set()).update(found)
 
 
 def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> set:
+    """Zeitstempel aller erkannten Events (siehe preload_yolo_detections)."""
+    return set(preload_yolo_detections(video_path, cfg, progress_callback, cancel_event))
+
+
+def preload_yolo_detections(video_path: str, cfg: Config, progress_callback=None, cancel_event=None) -> dict:
     """
+    Gibt {Zeitstempel: {Klassennamen}} aller erkannten Event-Klassen (cfg.yolo_target_classes) zurueck.
+
+
     progress_callback(phase: str, percent: float) wird optional bei
     jedem analysierten Batch mit dem aktuellen Fortschritt (0-100) aufgerufen.
 
@@ -231,7 +240,7 @@ def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, ca
     """
     if cfg.yolo_model_path is None or YOLO is None:
         print("[YOLO] Kein Modell konfiguriert - YOLO uebersprungen.")
-        return set()
+        return {}
 
     print(f"[YOLO] Lade Modell: {cfg.yolo_model_path}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -240,7 +249,7 @@ def preload_yolo_events(video_path: str, cfg: Config, progress_callback=None, ca
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    event_times = set()
+    event_times = {}
     batch_size = max(1, cfg.yolo_batch_size)
 
     frame_queue: queue.Queue = queue.Queue(maxsize=batch_size * 3)
@@ -949,12 +958,16 @@ def cut_and_concat(
 # ----------------------------------------------------------------------
 
 def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, cancel_event=None,
-                       game_name: str | None = None, game_context: dict | None = None) -> dict:
+                       game_name: str | None = None, game_context: dict | None = None,
+                       analysis_event_classes: list | None = None) -> dict:
     """
     Gemeinsame Erkennungs-/Scoring-/Trimming-Pipeline (Phase A-E + Stufe 2/3),
     OHNE das Video zu schneiden. Wird von process_video() (schneidet
     anschliessend per ffmpeg) und export_fcpxml_timeline() (schreibt
     stattdessen eine FCPXML-Timeline) gemeinsam genutzt.
+
+    analysis_event_classes: nur diese YOLO-Klassen zaehlen als Trigger/Luecken-Anker der Analyse
+    (None = alle). "yolo_event_times" im Ergebnis bleibt davon unberuehrt und enthaelt immer alle Events.
 
     Gibt ein dict zurueck: yolo_event_times, all_segments, intro_metadata,
     timeline_rows, final_timeline_rows, log_text.
@@ -998,8 +1011,16 @@ def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, canc
         print(f"Video: {video_path}")
         print(f"Video-Laenge: {fmt_time(duration)}")
 
-        yolo_event_times = preload_yolo_events(video_path, cfg, progress_callback, cancel_event)
+        detections = preload_yolo_detections(video_path, cfg, progress_callback, cancel_event)
+        # Alle erkannten Events (auch fuer ML-Pipeline/Autolabeling); die Klassenauswahl betrifft nur die Trigger unten
+        yolo_event_times = set(detections)
         empty_result["yolo_event_times"] = yolo_event_times
+        trigger_times = yolo_event_times
+        if analysis_event_classes is not None:
+            wanted = set(analysis_event_classes)
+            trigger_times = {t for t, names in detections.items() if names & wanted}
+            print(f"[YOLO] Analyse nur mit Event-Klassen: {', '.join(sorted(wanted)) or 'keine'} "
+                  f"({len(trigger_times)} von {len(yolo_event_times)} Event-Zeitstempeln).")
         if cfg.ignore_audio:
             print("[Audio] Audio-Analyse uebersprungen (nur YOLO-Events).")
             # Platzhalter-Zeitachse, damit Fenster-Berechnung/Kappung auf die Videolaenge weiter funktioniert
@@ -1015,7 +1036,7 @@ def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, canc
             progress_callback("Audio-Analyse", 100.0)
 
         # --- Phase A: Punkte sammeln ---
-        points = collect_trigger_points(rms, times, cfg, yolo_event_times)
+        points = collect_trigger_points(rms, times, cfg, trigger_times)
 
         if not points:
             print("Keine Trigger-Punkte gefunden.")
@@ -1066,7 +1087,7 @@ def _analyze_segments(video_path: str, cfg: Config, progress_callback=None, canc
 
         for w_idx, w in enumerate(merged_windows, start=1):
             clip = (w["start"], w["end"])
-            sub_segments = remove_internal_gaps(clip, rms, times, cfg, yolo_event_times)
+            sub_segments = remove_internal_gaps(clip, rms, times, cfg, trigger_times)
 
             phase_reason = (f"Cluster-Groesse: {w['cluster_size']} Punkt(e) [{', '.join(w['point_types'])}] | "
                              f"Start-Trigger: {w['start_reason']} | "
@@ -1319,6 +1340,7 @@ def export_fcpxml_timeline(
     game_name: str | None = None,
     game_context: dict | None = None,
     top_marker_count: int = 5,
+    analysis_event_classes: list | None = None,
 ) -> dict:
     """
     Erstellt eine FCPXML-Timeline (DaVinci Resolve importierbar) aus denselben
@@ -1326,8 +1348,10 @@ def export_fcpxml_timeline(
     oder zu rendern. Jeder Clip verweist per In-/Out-Punkt auf das
     Originalvideo. Die Top-N Clips (nach LLM-Wertigkeitsscore, sonst nach dem
     Heuristik-Score) bekommen einen roten Marker in der Clip-Mitte.
+    analysis_event_classes: nur diese YOLO-Event-Klassen loesen Clips aus (None = alle).
     """
-    analysis = _analyze_segments(video_path, cfg, progress_callback, cancel_event, game_name, game_context)
+    analysis = _analyze_segments(video_path, cfg, progress_callback, cancel_event, game_name, game_context,
+                                 analysis_event_classes)
 
     result = {
         "yolo_event_times": analysis["yolo_event_times"],

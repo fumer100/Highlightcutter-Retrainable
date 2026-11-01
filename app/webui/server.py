@@ -327,13 +327,28 @@ class Core:
             )
         return self._pipeline_controllers[self.current_game]
 
+    def _event_classes(self) -> list:
+        """YOLO-Event-Klassen des aktuellen Spiels (Standard fuer Spiele ohne eigene Liste)."""
+        game = self._dm().game
+        return list(game.event_classes) if game.event_classes else list(Config().yolo_target_classes)
+
     def _sync_model_path(self):
         game = self._dm().game
         self.cfg.yolo_model_path = str(game.model_path)
         # Pro Spiel: eigene Event-Klassen, sonst der globale Standard (bestehende Spiele)
-        self.cfg.yolo_target_classes = (
-            list(game.event_classes) if game.event_classes else list(Config().yolo_target_classes)
-        )
+        self.cfg.yolo_target_classes = self._event_classes()
+
+    def _resolve_event_classes(self, event_classes):
+        """
+        Auswahl aus dem Timeline-Popup (nur fuer die Timeline-Analyse). Gibt (Klassen | None, Fehler) zurueck;
+        None = keine Auswahl uebergeben, also alle Event-Klassen.
+        """
+        if event_classes is None:
+            return None, None
+        available = self._event_classes()
+        if not isinstance(event_classes, list) or any(c not in available for c in event_classes):
+            return None, {"ok": False, "error": "Ungueltige Event-Klassen-Auswahl."}
+        return [c for c in available if c in event_classes], None
 
     def _review_count(self) -> int:
         try:
@@ -834,13 +849,15 @@ class Core:
             self._push("busy", False)
 
     def run_ml_pipeline(self, video_paths: list, export_fcpxml: bool = False, ml_only: bool = False,
-                        collect_frames=None, timeline_name: str = "", timeline_names=None):
+                        collect_frames=None, timeline_name: str = "", timeline_names=None, event_classes=None):
         """
         export_fcpxml=True: ML-Pipeline + FCPXML-Timeline, ohne das Video zu schneiden.
         ml_only=True: nur Events erkennen + ML-Pipeline (Daten sammeln), weder schneiden noch FCPXML.
         collect_frames: Ziel-Frames fuer 'Daten sammeln'; wird fuer das aktuelle Spiel gespeichert.
         timeline_name: eigener Name fuer FCPXML + Log-Dateien (leer = Videoname).
         timeline_names: eine Eingabe pro Video (Popup); hat Vorrang vor timeline_name.
+        event_classes: Event-Klassen, die die FCPXML-Analyse beruecksichtigt (None = alle). Betrifft NICHT die
+            ML-Pipeline (Autolabeling arbeitet immer mit allen erkannten Events).
         """
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
@@ -854,7 +871,11 @@ class Core:
             stems, err = self._resolve_stems(video_paths, timeline_name, timeline_names)
             if err:
                 return err
-
+            event_classes, err = self._resolve_event_classes(event_classes)
+            if err:
+                return err
+        else:
+            event_classes = None
         customized = None
         if ml_only and collect_frames is not None:
             try:
@@ -871,12 +892,13 @@ class Core:
         self.cancel_event = threading.Event()
         threading.Thread(
             target=self._ml_pipeline_worker,
-            args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only), stems),
+            args=(list(video_paths), self.cancel_event, bool(export_fcpxml), bool(ml_only), stems, event_classes),
             daemon=True,
         ).start()
         return {"ok": True, "customized": customized, "collectFrames": self.cfg.ml_collect_frames}
 
-    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False, stems=None):
+    def _ml_pipeline_worker(self, video_paths, cancel_event, export_fcpxml=False, ml_only=False, stems=None,
+                            event_classes=None):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
@@ -974,6 +996,7 @@ class Core:
                 if export_fcpxml:
                     result = export_fcpxml_timeline(
                         output_path=os.path.join(OUTPUT_DIR, f"{stems[idx - 1]}.fcpxml"),
+                        analysis_event_classes=event_classes,
                         **analysis_kwargs,
                     )
                     total_clips += result["clip_count"]
@@ -1199,9 +1222,10 @@ class Core:
             os.path.isfile(os.path.join(OUTPUT_DIR, f"{s}.fcpxml")) for s in stems
         ]
         return {"ok": True, "stems": stems, "defaults": defaults, "exists": exists,
-                "placeholder": placeholder, "dir": OUTPUT_DIR}
+                "placeholder": placeholder, "dir": OUTPUT_DIR,
+                "eventClasses": self._event_classes() if self.current_game else []}
 
-    def export_fcpxml(self, video_paths: list, timeline_name: str = "", timeline_names=None):
+    def export_fcpxml(self, video_paths: list, timeline_name: str = "", timeline_names=None, event_classes=None):
         if not video_paths:
             return {"ok": False, "error": "Keine Videos ausgewaehlt."}
         if (err := self._require_model()):
@@ -1211,15 +1235,18 @@ class Core:
         stems, err = self._resolve_stems(video_paths, timeline_name, timeline_names)
         if err:
             return err
+        event_classes, err = self._resolve_event_classes(event_classes)
+        if err:
+            return err
         self.cancel_event = threading.Event()
         threading.Thread(
             target=self._fcpxml_worker,
-            args=(list(video_paths), self.cancel_event, stems),
+            args=(list(video_paths), self.cancel_event, stems, event_classes),
             daemon=True,
         ).start()
         return {"ok": True}
 
-    def _fcpxml_worker(self, video_paths, cancel_event, stems=None):
+    def _fcpxml_worker(self, video_paths, cancel_event, stems=None, event_classes=None):
         real_stdout = sys.stdout
         sys.stdout = _LogStream(self)
         self._push("busy", True)
@@ -1247,6 +1274,7 @@ class Core:
                     cancel_event=cancel_event,
                     game_name=self.current_game,
                     game_context=self._dm().game.llm_context,
+                    analysis_event_classes=event_classes,
                 )
                 total_clips += result["clip_count"]
                 total_top += len(result["top_clip_indices"])
@@ -1613,6 +1641,7 @@ def api_run_ml_pipeline():
     return jsonify(core.run_ml_pipeline(
         data.get("videos", []), bool(data.get("exportFcpxml", False)), bool(data.get("mlOnly", False)),
         data.get("collectFrames"), data.get("timelineName") or "", data.get("timelineNames"),
+        data.get("eventClasses"),
     ))
 
 
@@ -1639,7 +1668,7 @@ def api_open_test_output():
 def api_export_fcpxml():
     data = request.get_json(force=True)
     return jsonify(core.export_fcpxml(
-        data.get("videos", []), data.get("timelineName") or "", data.get("timelineNames")
+        data.get("videos", []), data.get("timelineName") or "", data.get("timelineNames"), data.get("eventClasses")
     ))
 
 

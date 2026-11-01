@@ -13,6 +13,11 @@
     <h2>🎬 Timelines benennen</h2>
     <p class="modal-hint">Dateiname je Video, ohne Endung. Er gilt für die FCPXML und ihre Log-Dateien und ist auch der Timeline-Name in DaVinci Resolve.</p>
     <div id="timelineNamesList" class="timeline-names-list"></div>
+    <div id="timelineEventsBox" class="tn-events hidden">
+      <div class="tn-events-title">YOLO-Events für die Timeline-Analyse</div>
+      <div id="timelineEventsList" class="tn-events-list"></div>
+      <div class="tn-events-hint">Gilt nur für die Timeline (FCPXML). Die ML-Pipeline, z. B. Autolabeln, nutzt weiterhin alle erkannten Events.</div>
+    </div>
     <div class="modal-actions">
       <button id="timelineNamesDefaultBtn" class="btn btn-outline" title="Alle Namen auf das Standardformat zurücksetzen">Standardnamen</button>
       <span class="modal-spacer"></span>
