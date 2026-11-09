@@ -408,7 +408,14 @@ class Api:
             self._call_js("onStatus", "Training laeuft...")
             trainer.train(epochs=30, img_size=640)
             self._call_js("onStatus", "Training fertig")
-            self._call_js("onDone", {"message": "Retraining abgeschlossen."})
+            evaluation = trainer.last_evaluation
+            if evaluation is not None and not evaluation["accepted"]:
+                self._call_js("onDone", {"message": (
+                    "Retraining fertig, aber das neue Modell wurde NICHT uebernommen: "
+                    f"{evaluation['reason']} Das bisherige Modell bleibt aktiv."
+                )})
+            else:
+                self._call_js("onDone", {"message": "Retraining abgeschlossen."})
         except Exception as e:
             self._call_js("onError", str(e))
         finally:

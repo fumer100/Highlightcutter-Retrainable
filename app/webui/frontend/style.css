@@ -314,7 +314,8 @@ select {
 .setting-row small { grid-column: 1 / -1; color: var(--text-dim); font-size: 11px; }
 
 .setting-row label { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.setting-row.audio-hidden { display: none; }
+.setting-row.audio-hidden,
+.setting-row.cut-hidden { display: none; }
 .info-icon {
   flex: none;
   display: inline-flex;

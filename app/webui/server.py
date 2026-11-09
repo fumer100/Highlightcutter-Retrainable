@@ -1100,14 +1100,23 @@ class Core:
             # Datenstand VOR dem Training merken: genau damit wird trainiert
             snapshot = compute_dataset_snapshot(dm)
             trainer.train(epochs=epochs, img_size=640, cancel_event=cancel_event)
-            append_history(dm.game.model_path, snapshot, epochs, first_model)
-            self._push("status", "Training fertig")
+            evaluation = trainer.last_evaluation
+            append_history(dm.game.model_path, snapshot, epochs, first_model, evaluation)
+            accepted = evaluation is None or evaluation["accepted"]
+            self._push("status", "Training fertig" if accepted else "Training fertig - neues Modell abgelehnt")
 
             # Gecachte Pipeline nutzt sonst weiter das alte (bzw. kein) Modell
-            self._pipeline_controllers.pop(game_name, None)
+            if accepted:
+                self._pipeline_controllers.pop(game_name, None)
             self._push("stateChanged")
 
-            if first_model:
+            if not accepted:
+                self._push("done", {"message": (
+                    f"Retraining fertig, aber das neue Modell ist auf dem Pruefset ({evaluation['eval_set']}) "
+                    f"nicht besser und wurde NICHT uebernommen: {evaluation['reason']} "
+                    "Das bisherige Modell bleibt aktiv."
+                )})
+            elif first_model:
                 model_path = str(dm.game.model_path)
                 self._push("firstModelReady", {
                     "game": game_name,

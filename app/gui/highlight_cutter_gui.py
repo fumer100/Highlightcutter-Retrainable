@@ -677,7 +677,15 @@ class HighlightCutterGUI:
             self.status.set("Training laeuft...")
             trainer.train(epochs=30, img_size=640)
             self.status.set("Training fertig")
-            messagebox.showinfo("Training", "Retraining abgeschlossen.")
+            evaluation = trainer.last_evaluation
+            if evaluation is not None and not evaluation["accepted"]:
+                messagebox.showwarning(
+                    "Training",
+                    "Retraining fertig, aber das neue Modell wurde NICHT uebernommen:\n"
+                    f"{evaluation['reason']}\nDas bisherige Modell bleibt aktiv.",
+                )
+            else:
+                messagebox.showinfo("Training", "Retraining abgeschlossen.")
         except Exception as e:
             messagebox.showerror("Fehler", str(e))
         finally:

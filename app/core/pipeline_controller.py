@@ -31,6 +31,30 @@ def bucket_label(lo: float, hi: float) -> str:
     return f"{lo:.2f}-{min(hi, 1.0):.2f}"
 
 
+RARITY_WEIGHT = 0.5  # Anteil der Seltenheit an der Review-Prioritaet (Rest: Unsicherheit des Modells)
+
+
+def review_priority(result: dict, mid: float, half_range: float, class_counts: dict[int, int]) -> float:
+    """
+    Prioritaet (0-1, hoeher = eher behalten) eines Review-Kandidaten beim Begrenzen der Queue.
+    Unsicherheit: 1 in der Mitte zwischen Review- und Auto-Schwelle, 0 am Rand.
+    Seltenheit: 1 - Boxen der seltensten Klasse im Bild / Boxen der haeufigsten Klasse (Bilder ohne Box: 0).
+    """
+    if half_range > 0:
+        uncertainty = max(0.0, 1.0 - abs(result["confidence"] - mid) / half_range)
+    else:
+        uncertainty = 1.0
+
+    most_common = max(class_counts.values(), default=0)
+    classes = result.get("classes") or []
+    if classes and most_common > 0:
+        rarity = max(1.0 - class_counts.get(c, 0) / most_common for c in classes)
+    else:
+        rarity = 0.0
+
+    return (1.0 - RARITY_WEIGHT) * uncertainty + RARITY_WEIGHT * rarity
+
+
 AUTO_OFF = 1.01  # Konfidenz kann nie > 1 sein -> nichts wird automatisch ins Training uebernommen
 COLLECT_MIN_CONFIDENCE = 0.10  # Daten-sammeln: auch sehr unsichere Vorschlaege des Modells als Vorlabel zeigen
 COLLECT_EVENT_SHARE = 0.5  # Anteil der Sammel-Frames, der von Modell-Events stammt (Rest: neue Frames)
@@ -201,11 +225,15 @@ class PipelineController:
             if progress_callback is not None:
                 progress_callback("Vorlabeln", i / len(sample_ids) * 100)
 
-        # 4/4: Review-Queue pro Video begrenzen (unsicherste zuerst behalten)
+        # 4/4: Review-Queue pro Video begrenzen (unsicherste + seltene Klassen zuerst behalten)
         step(4, "Review-Queue begrenzen")
         if max_review_per_video > 0 and len(review_samples) > max_review_per_video:
             mid = (review_min_confidence + auto_threshold) / 2
-            review_samples.sort(key=lambda r: abs(r["confidence"] - mid))
+            half_range = (auto_threshold - review_min_confidence) / 2
+            class_counts = self.dm.class_box_counts()
+            review_samples.sort(
+                key=lambda r: review_priority(r, mid, half_range, class_counts), reverse=True
+            )
             for r in review_samples[max_review_per_video:]:
                 self._delete_sample(r["sample_id"])
                 stats["review_capped"] += 1

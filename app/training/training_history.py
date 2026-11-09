@@ -37,6 +37,7 @@ def compute_dataset_snapshot(dm: DatasetManager) -> dict:
     return {
         "train": len(train),
         "val": len(val),
+        "golden": len(list(dm.golden_images.glob("*.jpg"))),
         "total": len(train) + len(val),
         "with_boxes": with_boxes,
         "boxes": sum(per_class.values()),
@@ -58,14 +59,17 @@ def load_history(model_path: Path) -> list[dict]:
         return []
 
 
-def append_history(model_path: Path, snapshot: dict, epochs: int, first_model: bool):
+def append_history(model_path: Path, snapshot: dict, epochs: int, first_model: bool, evaluation: dict | None = None):
     history = load_history(model_path)
-    history.append({
+    entry = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "epochs": epochs,
         "first_model": first_model,
         "snapshot": snapshot,
-    })
+    }
+    if evaluation is not None:
+        entry["evaluation"] = evaluation
+    history.append(entry)
     path = history_path(model_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -103,6 +107,7 @@ def build_training_overview(dm: DatasetManager, min_first_labeled: int) -> dict:
         "added": added,
         "removed": removed,
         "reviewPending": len(list(dm.review_images.glob("*.jpg"))),
+        "golden": now["golden"],
         "trainingCount": len(history),
         "problem": problem,
     }

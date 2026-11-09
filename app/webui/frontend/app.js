@@ -870,6 +870,7 @@ function renderSettings(schema) {
     const row = document.createElement("div");
     row.className = item.type === "text" ? "setting-row wide" : "setting-row";
     row.dataset.setting = item.attr;
+    if (CUT_ONLY_SETTINGS.includes(item.attr)) row.classList.add("cut-hidden");
     const label = document.createElement("label");
     const labelText = document.createElement("span");
     labelText.textContent = item.label;
@@ -913,6 +914,11 @@ function renderSettings(schema) {
   if (ignoreAudio) ignoreAudio.addEventListener("change", updateAudioSettingsVisibility);
   updateAudioSettingsVisibility();
 }
+
+// Einstellungen fuer das tatsaechliche Schneiden/Rendern per ffmpeg (Encoding, parallele Schnitte).
+// Die Schneiden-Buttons sind ausgeblendet (nur FCPXML-Export), deshalb sind diese Felder ebenfalls versteckt.
+// Die Werte bleiben erhalten; zum Wieder-Einblenden die Liste leeren.
+const CUT_ONLY_SETTINGS = ["use_gpu_encoding", "nvenc_cq", "crf", "max_parallel_cuts"];
 
 // Einstellungen, die bei "Nur YOLO-Events (Audio ignorieren)" keine Wirkung haben, werden ausgeblendet
 // (die Werte bleiben erhalten und werden weiter gespeichert)

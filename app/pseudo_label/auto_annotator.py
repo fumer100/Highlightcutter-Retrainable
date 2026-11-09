@@ -14,9 +14,11 @@ class AutoAnnotator:
     """
     Fuehrt YOLO auf Frames aus und erzeugt Pseudo-Labels.
     Entscheidet anhand der SCHWAECHSTEN Box im Bild:
-    - min_conf >= confidence_threshold          -> automatisch ins Training (train/val)
+    - min_conf >= confidence_threshold          -> automatisch ins Training (nur train, nie val/golden)
     - review_threshold <= min_conf < threshold  -> Review Queue (unsicher)
     - keine Box >= review_threshold             -> verworfen (nichts erkannt)
+    Gehoert das Quellvideo zu val/golden, bleibt auch ein sicheres Bild in der Review
+    (dort nur menschlich geprueft).
     """
 
     def __init__(
@@ -60,6 +62,7 @@ class AutoAnnotator:
 
         confidences = []
         label_lines = []
+        class_ids = set()
 
         if boxes is not None and len(boxes) > 0:
             for box in boxes:
@@ -67,6 +70,7 @@ class AutoAnnotator:
                 conf = float(box.conf[0])
                 x, y, w, h = box.xywhn[0].tolist()
                 confidences.append(conf)
+                class_ids.add(cls_id)
                 label_lines.append(f"{cls_id} {x} {y} {w} {h}")
 
         if not label_lines and keep_empty:
@@ -78,6 +82,7 @@ class AutoAnnotator:
                 "outcome": "review",
                 "needs_review": True,
                 "label_count": 0,
+                "classes": [],
                 "split": None,
             }
 
@@ -92,12 +97,18 @@ class AutoAnnotator:
                 "outcome": "discarded",
                 "needs_review": False,
                 "label_count": 0,
+                "classes": [],
                 "split": None,
             }
 
         min_conf = min(confidences)
         max_conf = max(confidences)
         outcome = "auto" if min_conf >= auto_threshold else "review"
+        auto_blocked = False
+        if outcome == "auto" and not self.dm.can_auto_promote(sample_id):
+            # Video gehoert zu val/golden: dort nur menschlich gepruefte Labels, also zur Review
+            outcome = "review"
+            auto_blocked = True
 
         label_path.write_text("\n".join(label_lines))
 
@@ -113,12 +124,14 @@ class AutoAnnotator:
         meta_data["model_version"] = model_version
         meta_data["reviewed"] = outcome == "auto"
         meta_data["accepted"] = outcome == "auto"
+        if outcome == "auto":
+            meta_data["label_source"] = "auto"
 
         split = None
         if outcome == "auto":
-            # Hohe Konfidenz -> direkt ins Trainingsset (inkl. val-Anteil)
-            img_dst, label_dst = self.dm.route_promoted_sample(image_path, label_path)
-            split = "val" if img_dst.parent == self.dm.val_images else "train"
+            # Hohe Konfidenz -> direkt ins Trainingsset (nie nach val/golden)
+            img_dst, label_dst = self.dm.route_promoted_sample(image_path, label_path, human_reviewed=False)
+            split = "train"
             meta_data["image_path"] = str(img_dst)
             meta_data["label_path"] = str(label_dst)
 
@@ -132,5 +145,7 @@ class AutoAnnotator:
             "outcome": outcome,
             "needs_review": outcome == "review",
             "label_count": len(label_lines),
+            "classes": sorted(class_ids),
+            "auto_blocked": auto_blocked,
             "split": split,
         }
